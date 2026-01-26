@@ -26,10 +26,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
         run: cargo bench -p bench
+      - name: Prepare Pages root
+        run: |
+          mkdir -p target/criterion
+          cp pages/index.html target/criterion/index.html
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: target/criterion/report
+          path: target/criterion
 
   deploy:
     runs-on: ubuntu-latest

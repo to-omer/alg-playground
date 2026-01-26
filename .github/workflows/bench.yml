@@ -23,9 +23,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install gnuplot
+        run: sudo apt-get update && sudo apt-get install -y gnuplot-nox
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
-        run: cargo bench -p bench
+        run: cargo bench -p bench -- --plotting-backend gnuplot
       - name: Prepare Pages root
         run: |
           mkdir -p target/criterion

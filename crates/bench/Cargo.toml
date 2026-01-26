@@ -1,0 +1,15 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+criterion = "0.8.1"
+gcd = { path = "../gcd" }
+rand = "0.9"
+
+[[bench]]
+name = "gcd"
+harness = false

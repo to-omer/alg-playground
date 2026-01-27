@@ -5,11 +5,6 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-[dev-dependencies]
+[dependencies]
 criterion = "0.8.1"
-gcd = { path = "../gcd" }
 rand = "0.9"
-
-[[bench]]
-name = "gcd"
-harness = false

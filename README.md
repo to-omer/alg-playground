@@ -6,7 +6,8 @@ Criterion reports to GitHub Pages.
 ## Structure
 
 - `crates/<algo>`: one crate per algorithm
-- `crates/bench`: Criterion benchmarks that compare implementations
+- `crates/<algo>/benches`: per-algorithm Criterion benches
+- `crates/bench`: shared benchmark utilities (inputs, defaults)
 
 ## Quick start
 
@@ -14,7 +15,7 @@ Criterion reports to GitHub Pages.
 cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-cargo bench -p bench
+cargo bench -p gcd
 ```
 
 ## Add a new algorithm
@@ -22,7 +23,7 @@ cargo bench -p bench
 1. Create a crate under `crates/<algo>`.
 2. Implement the algorithm and tests in the same file.
 3. Document the algorithm and references in `crates/<algo>/README.md`.
-4. Add benchmarks under `crates/bench/benches` if needed.
+4. Add benchmarks under `crates/<algo>/benches` if needed and reuse helpers in `crates/bench`.
 
 ## Benchmark reports
 

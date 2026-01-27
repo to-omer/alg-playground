@@ -27,7 +27,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gnuplot-nox
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
-        run: cargo bench -p bench -- --plotting-backend gnuplot
+        run: cargo bench --workspace
       - name: Prepare Pages root
         run: |
           mkdir -p target/criterion

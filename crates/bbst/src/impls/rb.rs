@@ -5,7 +5,7 @@ use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, Se
 
 pub struct ImplicitRbTree<P: LazyMapMonoid> {
     root: Link<P>,
-    len: usize,
+    len: u32,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -13,10 +13,11 @@ struct Node<P: LazyMapMonoid> {
     agg: P::Agg,
     agg_rev: P::Agg,
     lazy: P::Act,
+    lazy_pending: bool,
     rev: bool,
-    size: usize,
+    size: u32,
     red: bool,
-    black_height: u32,
+    black_height: u8,
     left: Link<P>,
     right: Link<P>,
 }
@@ -36,6 +37,7 @@ where
             agg: self.agg.clone(),
             agg_rev: self.agg_rev.clone(),
             lazy: self.lazy.clone(),
+            lazy_pending: self.lazy_pending,
             rev: self.rev,
             size: self.size,
             red: self.red,
@@ -54,6 +56,7 @@ impl<P: LazyMapMonoid> Node<P> {
             agg: agg.clone(),
             agg_rev: agg,
             lazy: P::act_unit(),
+            lazy_pending: false,
             rev: false,
             size: 1,
             red,
@@ -63,7 +66,7 @@ impl<P: LazyMapMonoid> Node<P> {
         }
     }
 
-    fn size(node: &Link<P>) -> usize {
+    fn size(node: &Link<P>) -> u32 {
         node.as_ref().map(|n| n.size).unwrap_or(0)
     }
 
@@ -105,9 +108,11 @@ impl<P: LazyMapMonoid> Node<P> {
 
     fn apply_action(&mut self, act: &P::Act) {
         self.key = P::act_apply_key(&self.key, act);
-        self.agg = P::act_apply_agg(&self.agg, act, self.size);
-        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, self.size);
+        let size = self.size as usize;
+        self.agg = P::act_apply_agg(&self.agg, act, size);
+        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, size);
         self.lazy = P::act_compose(act, &self.lazy);
+        self.lazy_pending = true;
     }
 
     fn apply_reverse(&mut self) {
@@ -127,14 +132,19 @@ impl<P: LazyMapMonoid> Node<P> {
             self.rev = false;
         }
 
-        let act = self.lazy.clone();
-        if let Some(left) = self.left.as_deref_mut() {
-            left.apply_action(&act);
+        if self.lazy_pending {
+            if self.left.is_some() || self.right.is_some() {
+                let act = self.lazy.clone();
+                if let Some(left) = self.left.as_deref_mut() {
+                    left.apply_action(&act);
+                }
+                if let Some(right) = self.right.as_deref_mut() {
+                    right.apply_action(&act);
+                }
+            }
+            self.lazy = P::act_unit();
+            self.lazy_pending = false;
         }
-        if let Some(right) = self.right.as_deref_mut() {
-            right.apply_action(&act);
-        }
-        self.lazy = P::act_unit();
     }
 }
 
@@ -164,6 +174,80 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         }
 
         Some((start, end))
+    }
+
+    fn fold_range(node: &mut Link<P>, start: usize, end: usize) -> P::Agg {
+        if start >= end {
+            return P::agg_unit();
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return P::agg_unit();
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            return node_ref.agg.clone();
+        }
+
+        node_ref.push();
+        let left_size = Node::size(&node_ref.left) as usize;
+        if end <= left_size {
+            return Self::fold_range(&mut node_ref.left, start, end);
+        }
+        if start > left_size {
+            return Self::fold_range(
+                &mut node_ref.right,
+                start - left_size - 1,
+                end - left_size - 1,
+            );
+        }
+
+        let left_agg = if start < left_size {
+            Self::fold_range(&mut node_ref.left, start, left_size)
+        } else {
+            P::agg_unit()
+        };
+        let right_agg = if end > left_size + 1 {
+            Self::fold_range(&mut node_ref.right, 0, end - left_size - 1)
+        } else {
+            P::agg_unit()
+        };
+
+        P::agg_merge(&left_agg, &node_ref.key, &right_agg)
+    }
+
+    fn update_range(node: &mut Link<P>, start: usize, end: usize, act: &P::Act) {
+        if start >= end {
+            return;
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return;
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            node_ref.apply_action(act);
+            return;
+        }
+
+        node_ref.push();
+        let left_size = Node::size(&node_ref.left) as usize;
+        if start < left_size {
+            let left_end = left_size.min(end);
+            Self::update_range(&mut node_ref.left, start, left_end, act);
+        }
+        if start <= left_size && end > left_size {
+            node_ref.key = P::act_apply_key(&node_ref.key, act);
+        }
+        if end > left_size + 1 {
+            let right_start = if start > left_size + 1 {
+                start - left_size - 1
+            } else {
+                0
+            };
+            let right_end = end - left_size - 1;
+            Self::update_range(&mut node_ref.right, right_start, right_end, act);
+        }
+
+        node_ref.recalc();
     }
 
     fn is_red(node: &Link<P>) -> bool {
@@ -210,67 +294,70 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
 
         let left_red = Self::is_red(&node.left);
         let right_red = Self::is_red(&node.right);
-        let left_left_red = node
-            .left
-            .as_ref()
-            .and_then(|left| left.left.as_ref())
-            .map(|left| left.red)
-            .unwrap_or(false);
-        let left_right_red = node
-            .left
-            .as_ref()
-            .and_then(|left| left.right.as_ref())
-            .map(|right| right.red)
-            .unwrap_or(false);
-        let right_left_red = node
-            .right
-            .as_ref()
-            .and_then(|right| right.left.as_ref())
-            .map(|left| left.red)
-            .unwrap_or(false);
-        let right_right_red = node
-            .right
-            .as_ref()
-            .and_then(|right| right.right.as_ref())
-            .map(|right| right.red)
-            .unwrap_or(false);
-
-        if left_red && (left_left_red || left_right_red) {
-            if left_right_red {
-                let left = node.left.take().map(Self::rotate_left);
-                node.left = left;
+        if left_red {
+            let left_left_red = node
+                .left
+                .as_ref()
+                .and_then(|left| left.left.as_ref())
+                .map(|left| left.red)
+                .unwrap_or(false);
+            let left_right_red = node
+                .left
+                .as_ref()
+                .and_then(|left| left.right.as_ref())
+                .map(|right| right.red)
+                .unwrap_or(false);
+            if left_left_red || left_right_red {
+                if left_right_red {
+                    let left = node.left.take().map(Self::rotate_left);
+                    node.left = left;
+                }
+                let mut root = Self::rotate_right(node);
+                root.red = true;
+                if let Some(left) = root.left.as_deref_mut() {
+                    left.red = false;
+                    left.recalc();
+                }
+                if let Some(right) = root.right.as_deref_mut() {
+                    right.red = false;
+                    right.recalc();
+                }
+                root.recalc();
+                return root;
             }
-            let mut root = Self::rotate_right(node);
-            root.red = true;
-            if let Some(left) = root.left.as_deref_mut() {
-                left.red = false;
-                left.recalc();
-            }
-            if let Some(right) = root.right.as_deref_mut() {
-                right.red = false;
-                right.recalc();
-            }
-            root.recalc();
-            return root;
         }
 
-        if right_red && (right_left_red || right_right_red) {
-            if right_left_red {
-                let right = node.right.take().map(Self::rotate_right);
-                node.right = right;
+        if right_red {
+            let right_left_red = node
+                .right
+                .as_ref()
+                .and_then(|right| right.left.as_ref())
+                .map(|left| left.red)
+                .unwrap_or(false);
+            let right_right_red = node
+                .right
+                .as_ref()
+                .and_then(|right| right.right.as_ref())
+                .map(|right| right.red)
+                .unwrap_or(false);
+            if right_left_red || right_right_red {
+                if right_left_red {
+                    let right = node.right.take().map(Self::rotate_right);
+                    node.right = right;
+                }
+                let mut root = Self::rotate_left(node);
+                root.red = true;
+                if let Some(left) = root.left.as_deref_mut() {
+                    left.red = false;
+                    left.recalc();
+                }
+                if let Some(right) = root.right.as_deref_mut() {
+                    right.red = false;
+                    right.recalc();
+                }
+                root.recalc();
+                return root;
             }
-            let mut root = Self::rotate_left(node);
-            root.red = true;
-            if let Some(left) = root.left.as_deref_mut() {
-                left.red = false;
-                left.recalc();
-            }
-            if let Some(right) = root.right.as_deref_mut() {
-                right.red = false;
-                right.recalc();
-            }
-            root.recalc();
-            return root;
         }
 
         node.recalc();
@@ -281,7 +368,7 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         mut left: Box<Node<P>>,
         key: P::Key,
         right: Link<P>,
-        target_bh: u32,
+        target_bh: u8,
     ) -> Box<Node<P>> {
         left.push();
         let right_bh = left.right.as_ref().map(|n| n.black_height).unwrap_or(0);
@@ -311,7 +398,7 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         mut right: Box<Node<P>>,
         key: P::Key,
         left: Link<P>,
-        target_bh: u32,
+        target_bh: u8,
     ) -> Box<Node<P>> {
         right.push();
         let left_bh = right.left.as_ref().map(|n| n.black_height).unwrap_or(0);
@@ -369,7 +456,7 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
     }
 
     fn pop_last(root: Link<P>) -> (Link<P>, Option<P::Key>) {
-        let len = Node::size(&root);
+        let len = Node::size(&root) as usize;
         if len == 0 {
             return (None, None);
         }
@@ -385,7 +472,7 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         };
 
         node.push();
-        let left_size = Node::size(&node.left);
+        let left_size = Node::size(&node.left) as usize;
         if left_count <= left_size {
             let (left, right) = Self::split(node.left.take(), left_count);
             node.left = right;
@@ -414,15 +501,19 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
     }
 
     fn get_node(node: &mut Link<P>, index: usize) -> Option<&P::Key> {
-        let node_ref = node.as_deref_mut()?;
-        node_ref.push();
-        let left_size = Node::size(&node_ref.left);
-        if index < left_size {
-            Self::get_node(&mut node_ref.left, index)
-        } else if index == left_size {
-            Some(&node_ref.key)
-        } else {
-            Self::get_node(&mut node_ref.right, index - left_size - 1)
+        let mut current = node.as_deref_mut()?;
+        let mut index = index;
+        loop {
+            current.push();
+            let left_size = Node::size(&current.left) as usize;
+            if index < left_size {
+                current = current.left.as_deref_mut()?;
+            } else if index == left_size {
+                return Some(&current.key);
+            } else {
+                index -= left_size + 1;
+                current = current.right.as_deref_mut()?;
+            }
         }
     }
 }
@@ -452,18 +543,18 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
     type Key = P::Key;
 
     fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     fn get(&mut self, index: usize) -> Option<&Self::Key> {
-        if index >= self.len {
+        if index >= self.len as usize {
             return None;
         }
         Self::get_node(&mut self.root, index)
     }
 
     fn insert(&mut self, index: usize, key: Self::Key) {
-        if index > self.len {
+        if index > self.len as usize {
             return;
         }
         let (left, right) = Self::split(self.root.take(), index);
@@ -472,7 +563,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
     }
 
     fn remove(&mut self, index: usize) -> Option<Self::Key> {
-        if index >= self.len {
+        if index >= self.len as usize {
             return None;
         }
         let (left, rest) = Self::split(self.root.take(), index);
@@ -486,7 +577,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
 
 impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitRbTree<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len));
+        let (left, right) = Self::split(self.root.take(), index.min(self.len as usize));
         self.root = Self::make_black(left);
         self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
         let right = Self::make_black(right);
@@ -504,21 +595,14 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitRbTree<P> {
     type Agg = P::Agg;
 
     fn fold<R: RangeBounds<usize>>(&mut self, range: R) -> Self::Agg {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return P::agg_unit();
         };
         if start == end {
             return P::agg_unit();
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mid, right) = Self::split(rest, end - start);
-        let agg = mid
-            .as_ref()
-            .map(|node| node.agg.clone())
-            .unwrap_or_else(P::agg_unit);
-        self.root = Self::merge(left, Self::merge(mid, right));
-        agg
+        Self::fold_range(&mut self.root, start, end)
     }
 }
 
@@ -526,25 +610,20 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitRbTree<P> {
     type Act = P::Act;
 
     fn update<R: RangeBounds<usize>>(&mut self, range: R, act: Self::Act) {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
         };
         if start == end {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
-        if let Some(node) = mid.as_deref_mut() {
-            node.apply_action(&act);
-        }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        Self::update_range(&mut self.root, start, end, &act);
     }
 }
 
 impl<P: LazyMapMonoid> SequenceReverse for ImplicitRbTree<P> {
     fn reverse<R: RangeBounds<usize>>(&mut self, range: R) {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
         };
         if start == end {

@@ -13,9 +13,10 @@ struct Node<P: LazyMapMonoid> {
     agg: P::Agg,
     agg_rev: P::Agg,
     lazy: P::Act,
+    lazy_pending: bool,
     rev: bool,
-    size: usize,
-    height: i32,
+    size: u32,
+    height: u8,
     left: Link<P>,
     right: Link<P>,
 }
@@ -35,6 +36,7 @@ where
             agg: self.agg.clone(),
             agg_rev: self.agg_rev.clone(),
             lazy: self.lazy.clone(),
+            lazy_pending: self.lazy_pending,
             rev: self.rev,
             size: self.size,
             height: self.height,
@@ -52,6 +54,7 @@ impl<P: LazyMapMonoid> Node<P> {
             agg: agg.clone(),
             agg_rev: agg,
             lazy: P::act_unit(),
+            lazy_pending: false,
             rev: false,
             size: 1,
             height: 1,
@@ -60,11 +63,11 @@ impl<P: LazyMapMonoid> Node<P> {
         }
     }
 
-    fn size(node: &Link<P>) -> usize {
+    fn size(node: &Link<P>) -> u32 {
         node.as_ref().map(|n| n.size).unwrap_or(0)
     }
 
-    fn height(node: &Link<P>) -> i32 {
+    fn height(node: &Link<P>) -> u8 {
         node.as_ref().map(|n| n.height).unwrap_or(0)
     }
 
@@ -98,9 +101,11 @@ impl<P: LazyMapMonoid> Node<P> {
 
     fn apply_action(&mut self, act: &P::Act) {
         self.key = P::act_apply_key(&self.key, act);
-        self.agg = P::act_apply_agg(&self.agg, act, self.size);
-        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, self.size);
+        let size = self.size as usize;
+        self.agg = P::act_apply_agg(&self.agg, act, size);
+        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, size);
         self.lazy = P::act_compose(act, &self.lazy);
+        self.lazy_pending = true;
     }
 
     fn apply_reverse(&mut self) {
@@ -110,6 +115,9 @@ impl<P: LazyMapMonoid> Node<P> {
     }
 
     fn push(&mut self) {
+        if !self.rev && !self.lazy_pending {
+            return;
+        }
         if self.rev {
             if let Some(left) = self.left.as_deref_mut() {
                 left.apply_reverse();
@@ -120,14 +128,19 @@ impl<P: LazyMapMonoid> Node<P> {
             self.rev = false;
         }
 
-        let act = self.lazy.clone();
-        if let Some(left) = self.left.as_deref_mut() {
-            left.apply_action(&act);
+        if self.lazy_pending {
+            if self.left.is_some() || self.right.is_some() {
+                let act = self.lazy.clone();
+                if let Some(left) = self.left.as_deref_mut() {
+                    left.apply_action(&act);
+                }
+                if let Some(right) = self.right.as_deref_mut() {
+                    right.apply_action(&act);
+                }
+            }
+            self.lazy = P::act_unit();
+            self.lazy_pending = false;
         }
-        if let Some(right) = self.right.as_deref_mut() {
-            right.apply_action(&act);
-        }
-        self.lazy = P::act_unit();
     }
 }
 
@@ -183,7 +196,7 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
 
     fn rebalance(mut node: Box<Node<P>>) -> Box<Node<P>> {
         node.recalc();
-        let balance = Node::height(&node.left) - Node::height(&node.right);
+        let balance = i32::from(Node::height(&node.left)) - i32::from(Node::height(&node.right));
         if balance > 1 {
             if let Some(left) = node.left.as_ref()
                 && Node::height(&left.right) > Node::height(&left.left)
@@ -212,7 +225,7 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
         };
 
         node.push();
-        let left_size = Node::size(&node.left);
+        let left_size = Node::size(&node.left) as usize;
         if index <= left_size {
             node.left = Self::insert_node(node.left.take(), index, key);
         } else {
@@ -240,7 +253,7 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
         };
 
         node.push();
-        let left_size = Node::size(&node.left);
+        let left_size = Node::size(&node.left) as usize;
         if index < left_size {
             let (left, removed) = Self::remove_node(node.left.take(), index);
             node.left = left;
@@ -276,11 +289,11 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
         if left_count == 0 {
             return (None, Some(node));
         }
-        if left_count >= node.size {
+        if left_count >= node.size as usize {
             return (Some(node), None);
         }
 
-        let left_size = Node::size(&node.left);
+        let left_size = Node::size(&node.left) as usize;
         if left_count <= left_size {
             let (left, right) = Self::split(node.left.take(), left_count);
             node.left = right;
@@ -313,15 +326,19 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
     }
 
     fn get_node(node: &mut Link<P>, index: usize) -> Option<&P::Key> {
-        let node_ref = node.as_deref_mut()?;
-        node_ref.push();
-        let left_size = Node::size(&node_ref.left);
-        if index < left_size {
-            Self::get_node(&mut node_ref.left, index)
-        } else if index == left_size {
-            Some(&node_ref.key)
-        } else {
-            Self::get_node(&mut node_ref.right, index - left_size - 1)
+        let mut current = node.as_deref_mut()?;
+        let mut index = index;
+        loop {
+            current.push();
+            let left_size = Node::size(&current.left) as usize;
+            if index < left_size {
+                current = current.left.as_deref_mut()?;
+            } else if index == left_size {
+                return Some(&current.key);
+            } else {
+                index -= left_size + 1;
+                current = current.right.as_deref_mut()?;
+            }
         }
     }
 }
@@ -384,14 +401,22 @@ impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitAvl<P> {
     fn split_at(&mut self, index: usize) -> Self {
         let (left, right) = Self::split(self.root.take(), index.min(self.len));
         self.root = left;
-        self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
-        let len = right.as_ref().map(|node| node.size).unwrap_or(0);
+        self.len = self
+            .root
+            .as_ref()
+            .map(|node| node.size as usize)
+            .unwrap_or(0);
+        let len = right.as_ref().map(|node| node.size as usize).unwrap_or(0);
         Self { root: right, len }
     }
 
     fn merge(&mut self, right: Self) {
         self.root = Self::merge(self.root.take(), right.root);
-        self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
+        self.len = self
+            .root
+            .as_ref()
+            .map(|node| node.size as usize)
+            .unwrap_or(0);
     }
 }
 

@@ -6,21 +6,22 @@ use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, Se
 const DEFAULT_SEED: u64 = 0x5EED_BB57;
 
 #[derive(Clone, Copy)]
-struct SplitMix64 {
+struct XorShift64 {
     state: u64,
 }
 
-impl SplitMix64 {
+impl XorShift64 {
     fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
     fn next_u64(&mut self) -> u64 {
-        let mut z = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        self.state = z;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
     }
 
     fn fork(&mut self) -> Self {
@@ -30,8 +31,8 @@ impl SplitMix64 {
 
 pub struct ImplicitTreap<P: LazyMapMonoid> {
     root: Link<P>,
-    len: usize,
-    rng: SplitMix64,
+    len: u32,
+    rng: XorShift64,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -39,9 +40,11 @@ struct Node<P: LazyMapMonoid> {
     agg: P::Agg,
     agg_rev: P::Agg,
     lazy: P::Act,
+    lazy_pending: bool,
     rev: bool,
-    size: usize,
-    prio: u64,
+    size: u32,
+    left_size: u32,
+    prio: u32,
     left: Link<P>,
     right: Link<P>,
 }
@@ -61,8 +64,10 @@ where
             agg: self.agg.clone(),
             agg_rev: self.agg_rev.clone(),
             lazy: self.lazy.clone(),
+            lazy_pending: self.lazy_pending,
             rev: self.rev,
             size: self.size,
+            left_size: self.left_size,
             prio: self.prio,
             left: self.left.clone(),
             right: self.right.clone(),
@@ -71,22 +76,24 @@ where
 }
 
 impl<P: LazyMapMonoid> Node<P> {
-    fn new(key: P::Key, prio: u64) -> Self {
+    fn new(key: P::Key, prio: u32) -> Self {
         let agg = P::agg_from_key(&key);
         Self {
             key,
             agg: agg.clone(),
             agg_rev: agg,
             lazy: P::act_unit(),
+            lazy_pending: false,
             rev: false,
             size: 1,
+            left_size: 0,
             prio,
             left: None,
             right: None,
         }
     }
 
-    fn size(node: &Link<P>) -> usize {
+    fn size(node: &Link<P>) -> u32 {
         node.as_ref().map(|n| n.size).unwrap_or(0)
     }
 
@@ -110,6 +117,7 @@ impl<P: LazyMapMonoid> Node<P> {
         let left_size = Self::size(&self.left);
         let right_size = Self::size(&self.right);
 
+        self.left_size = left_size;
         self.size = 1 + left_size + right_size;
         self.agg = P::agg_merge(&left_agg, &self.key, &right_agg);
         self.agg_rev = P::agg_merge(&right_rev, &self.key, &left_rev);
@@ -117,18 +125,24 @@ impl<P: LazyMapMonoid> Node<P> {
 
     fn apply_action(&mut self, act: &P::Act) {
         self.key = P::act_apply_key(&self.key, act);
-        self.agg = P::act_apply_agg(&self.agg, act, self.size);
-        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, self.size);
+        let size = self.size as usize;
+        self.agg = P::act_apply_agg(&self.agg, act, size);
+        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, size);
         self.lazy = P::act_compose(act, &self.lazy);
+        self.lazy_pending = true;
     }
 
     fn apply_reverse(&mut self) {
         self.rev = !self.rev;
         std::mem::swap(&mut self.left, &mut self.right);
         std::mem::swap(&mut self.agg, &mut self.agg_rev);
+        self.left_size = self.size - 1 - self.left_size;
     }
 
     fn push(&mut self) {
+        if !self.rev && !self.lazy_pending {
+            return;
+        }
         if self.rev {
             if let Some(left) = self.left.as_deref_mut() {
                 left.apply_reverse();
@@ -139,14 +153,19 @@ impl<P: LazyMapMonoid> Node<P> {
             self.rev = false;
         }
 
-        let act = self.lazy.clone();
-        if let Some(left) = self.left.as_deref_mut() {
-            left.apply_action(&act);
+        if self.lazy_pending {
+            if self.left.is_some() || self.right.is_some() {
+                let act = self.lazy.clone();
+                if let Some(left) = self.left.as_deref_mut() {
+                    left.apply_action(&act);
+                }
+                if let Some(right) = self.right.as_deref_mut() {
+                    right.apply_action(&act);
+                }
+            }
+            self.lazy = P::act_unit();
+            self.lazy_pending = false;
         }
-        if let Some(right) = self.right.as_deref_mut() {
-            right.apply_action(&act);
-        }
-        self.lazy = P::act_unit();
     }
 }
 
@@ -159,7 +178,7 @@ impl<P: LazyMapMonoid> ImplicitTreap<P> {
         Self {
             root: None,
             len: 0,
-            rng: SplitMix64::new(seed),
+            rng: XorShift64::new(seed),
         }
     }
 
@@ -182,21 +201,94 @@ impl<P: LazyMapMonoid> ImplicitTreap<P> {
         Some((start, end))
     }
 
+    fn fold_range(node: &mut Link<P>, start: usize, end: usize) -> P::Agg {
+        if start >= end {
+            return P::agg_unit();
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return P::agg_unit();
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            return node_ref.agg.clone();
+        }
+
+        node_ref.push();
+        let left_size = node_ref.left_size as usize;
+        if end <= left_size {
+            return Self::fold_range(&mut node_ref.left, start, end);
+        }
+        if start > left_size {
+            return Self::fold_range(
+                &mut node_ref.right,
+                start - left_size - 1,
+                end - left_size - 1,
+            );
+        }
+
+        let left_agg = if start < left_size {
+            Self::fold_range(&mut node_ref.left, start, left_size)
+        } else {
+            P::agg_unit()
+        };
+        let right_agg = if end > left_size + 1 {
+            Self::fold_range(&mut node_ref.right, 0, end - left_size - 1)
+        } else {
+            P::agg_unit()
+        };
+
+        P::agg_merge(&left_agg, &node_ref.key, &right_agg)
+    }
+
+    fn update_range(node: &mut Link<P>, start: usize, end: usize, act: &P::Act) {
+        if start >= end {
+            return;
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return;
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            node_ref.apply_action(act);
+            return;
+        }
+
+        node_ref.push();
+        let left_size = node_ref.left_size as usize;
+        if start < left_size {
+            let left_end = left_size.min(end);
+            Self::update_range(&mut node_ref.left, start, left_end, act);
+        }
+        if start <= left_size && end > left_size {
+            node_ref.key = P::act_apply_key(&node_ref.key, act);
+        }
+        if end > left_size + 1 {
+            let right_start = if start > left_size + 1 {
+                start - left_size - 1
+            } else {
+                0
+            };
+            let right_end = end - left_size - 1;
+            Self::update_range(&mut node_ref.right, right_start, right_end, act);
+        }
+
+        node_ref.recalc();
+    }
+
     fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
         let mut node = match root {
             Some(node) => node,
             None => return (None, None),
         };
-
         node.push();
         if left_count == 0 {
             return (None, Some(node));
         }
-        if left_count >= node.size {
+        if left_count >= node.size as usize {
             return (Some(node), None);
         }
 
-        let left_size = Node::size(&node.left);
+        let left_size = node.left_size as usize;
         if left_count <= left_size {
             let (left, right) = Self::split(node.left.take(), left_count);
             node.left = right;
@@ -233,7 +325,7 @@ impl<P: LazyMapMonoid> ImplicitTreap<P> {
     fn get_node(node: &mut Link<P>, index: usize) -> Option<&P::Key> {
         let node_ref = node.as_deref_mut()?;
         node_ref.push();
-        let left_size = Node::size(&node_ref.left);
+        let left_size = node_ref.left_size as usize;
         if index < left_size {
             Self::get_node(&mut node_ref.left, index)
         } else if index == left_size {
@@ -270,21 +362,21 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitTreap<P> {
     type Key = P::Key;
 
     fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     fn get(&mut self, index: usize) -> Option<&Self::Key> {
-        if index >= self.len {
+        if index >= self.len as usize {
             return None;
         }
         Self::get_node(&mut self.root, index)
     }
 
     fn insert(&mut self, index: usize, key: Self::Key) {
-        if index > self.len {
+        if index > self.len as usize {
             return;
         }
-        let prio = self.rng.next_u64();
+        let prio = self.rng.next_u64() as u32;
         let node = Some(Box::new(Node::new(key, prio)));
         let (left, right) = Self::split(self.root.take(), index);
         self.root = Self::merge(Self::merge(left, node), right);
@@ -292,7 +384,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitTreap<P> {
     }
 
     fn remove(&mut self, index: usize) -> Option<Self::Key> {
-        if index >= self.len {
+        if index >= self.len as usize {
             return None;
         }
 
@@ -306,7 +398,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitTreap<P> {
 
 impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitTreap<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len));
+        let (left, right) = Self::split(self.root.take(), index.min(self.len as usize));
         self.root = left;
         self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
         let len = right.as_ref().map(|node| node.size).unwrap_or(0);
@@ -327,21 +419,14 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitTreap<P> {
     type Agg = P::Agg;
 
     fn fold<R: RangeBounds<usize>>(&mut self, range: R) -> Self::Agg {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return P::agg_unit();
         };
         if start == end {
             return P::agg_unit();
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mid, right) = Self::split(rest, end - start);
-        let agg = mid
-            .as_ref()
-            .map(|node| node.agg.clone())
-            .unwrap_or_else(P::agg_unit);
-        self.root = Self::merge(left, Self::merge(mid, right));
-        agg
+        Self::fold_range(&mut self.root, start, end)
     }
 }
 
@@ -349,25 +434,20 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitTreap<P> {
     type Act = P::Act;
 
     fn update<R: RangeBounds<usize>>(&mut self, range: R, act: Self::Act) {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
         };
         if start == end {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
-        if let Some(node) = mid.as_deref_mut() {
-            node.apply_action(&act);
-        }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        Self::update_range(&mut self.root, start, end, &act);
     }
 }
 
 impl<P: LazyMapMonoid> SequenceReverse for ImplicitTreap<P> {
     fn reverse<R: RangeBounds<usize>>(&mut self, range: R) {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
         };
         if start == end {

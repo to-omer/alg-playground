@@ -3,24 +3,25 @@ use std::ops::{Bound, RangeBounds};
 use crate::policy::LazyMapMonoid;
 use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, SequenceSplitMerge};
 
-const DEFAULT_SEED: u64 = 0x5EED_71F5;
+const DEFAULT_SEED: u64 = 0x5EED_1B57;
 
 #[derive(Clone, Copy)]
-struct SplitMix64 {
+struct XorShift64 {
     state: u64,
 }
 
-impl SplitMix64 {
+impl XorShift64 {
     fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
     fn next_u64(&mut self) -> u64 {
-        let mut z = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        self.state = z;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
     }
 
     fn fork(&mut self) -> Self {
@@ -28,10 +29,10 @@ impl SplitMix64 {
     }
 }
 
-pub struct ImplicitZipTree<P: LazyMapMonoid> {
+pub struct ImplicitRbst<P: LazyMapMonoid> {
     root: Link<P>,
-    len: u32,
-    rng: SplitMix64,
+    len: usize,
+    rng: XorShift64,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -43,8 +44,6 @@ struct Node<P: LazyMapMonoid> {
     rev: bool,
     size: u32,
     left_size: u32,
-    rank: u8,
-    tie: u16,
     left: Link<P>,
     right: Link<P>,
 }
@@ -68,8 +67,6 @@ where
             rev: self.rev,
             size: self.size,
             left_size: self.left_size,
-            rank: self.rank,
-            tie: self.tie,
             left: self.left.clone(),
             right: self.right.clone(),
         }
@@ -77,11 +74,8 @@ where
 }
 
 impl<P: LazyMapMonoid> Node<P> {
-    fn new(key: P::Key, rng: &mut SplitMix64) -> Self {
+    fn new(key: P::Key) -> Self {
         let agg = P::agg_from_key(&key);
-        let rand = rng.next_u64();
-        let rank = rand.leading_zeros() as u8;
-        let tie = (rand >> 32) as u16;
         Self {
             key,
             agg: agg.clone(),
@@ -91,8 +85,6 @@ impl<P: LazyMapMonoid> Node<P> {
             rev: false,
             size: 1,
             left_size: 0,
-            rank,
-            tie,
             left: None,
             right: None,
         }
@@ -172,13 +164,9 @@ impl<P: LazyMapMonoid> Node<P> {
             self.lazy_pending = false;
         }
     }
-
-    fn higher_priority(&self, other: &Self) -> bool {
-        (self.rank, self.tie) < (other.rank, other.tie)
-    }
 }
 
-impl<P: LazyMapMonoid> ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> ImplicitRbst<P> {
     pub fn new() -> Self {
         Self::with_seed(DEFAULT_SEED)
     }
@@ -187,7 +175,7 @@ impl<P: LazyMapMonoid> ImplicitZipTree<P> {
         Self {
             root: None,
             len: 0,
-            rng: SplitMix64::new(seed),
+            rng: XorShift64::new(seed),
         }
     }
 
@@ -210,47 +198,139 @@ impl<P: LazyMapMonoid> ImplicitZipTree<P> {
         Some((start, end))
     }
 
-    fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
-        let mut node = match root {
-            Some(node) => node,
-            None => return (None, None),
+    fn fold_range(node: &mut Link<P>, start: usize, end: usize) -> P::Agg {
+        if start >= end {
+            return P::agg_unit();
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return P::agg_unit();
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            return node_ref.agg.clone();
+        }
+
+        node_ref.push();
+        let left_size = node_ref.left_size as usize;
+        if end <= left_size {
+            return Self::fold_range(&mut node_ref.left, start, end);
+        }
+        if start > left_size {
+            return Self::fold_range(
+                &mut node_ref.right,
+                start - left_size - 1,
+                end - left_size - 1,
+            );
+        }
+
+        let left_agg = if start < left_size {
+            Self::fold_range(&mut node_ref.left, start, left_size)
+        } else {
+            P::agg_unit()
+        };
+        let right_agg = if end > left_size + 1 {
+            Self::fold_range(&mut node_ref.right, 0, end - left_size - 1)
+        } else {
+            P::agg_unit()
         };
 
-        node.push();
-        if left_count == 0 {
-            return (None, Some(node));
-        }
-        if left_count >= node.size as usize {
-            return (Some(node), None);
-        }
-
-        let left_size = node.left_size as usize;
-        if left_count <= left_size {
-            let (left, right) = Self::split(node.left.take(), left_count);
-            node.left = right;
-            node.recalc();
-            (left, Some(node))
-        } else {
-            let (left, right) = Self::split(node.right.take(), left_count - left_size - 1);
-            node.right = left;
-            node.recalc();
-            (Some(node), right)
-        }
+        P::agg_merge(&left_agg, &node_ref.key, &right_agg)
     }
 
-    fn merge(left: Link<P>, right: Link<P>) -> Link<P> {
+    fn update_range(node: &mut Link<P>, start: usize, end: usize, act: &P::Act) {
+        if start >= end {
+            return;
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return;
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            node_ref.apply_action(act);
+            return;
+        }
+
+        node_ref.push();
+        let left_size = node_ref.left_size as usize;
+        if start < left_size {
+            let left_end = left_size.min(end);
+            Self::update_range(&mut node_ref.left, start, left_end, act);
+        }
+        if start <= left_size && end > left_size {
+            node_ref.key = P::act_apply_key(&node_ref.key, act);
+        }
+        if end > left_size + 1 {
+            let right_start = if start > left_size + 1 {
+                start - left_size - 1
+            } else {
+                0
+            };
+            let right_end = end - left_size - 1;
+            Self::update_range(&mut node_ref.right, right_start, right_end, act);
+        }
+
+        node_ref.recalc();
+    }
+
+    fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
+        let mut node = root;
+        let mut left_count = left_count;
+        let mut left_stack: Vec<Box<Node<P>>> = Vec::new();
+        let mut right_stack: Vec<Box<Node<P>>> = Vec::new();
+        let mut right = None;
+
+        while let Some(mut current) = node {
+            current.push();
+            if left_count == 0 {
+                right = Some(current);
+                break;
+            }
+            let left_size = current.left_size as usize;
+            if left_count <= left_size {
+                let next = current.left.take();
+                right_stack.push(current);
+                node = next;
+            } else {
+                left_count -= left_size + 1;
+                let next = current.right.take();
+                left_stack.push(current);
+                node = next;
+            }
+        }
+
+        let mut left = None;
+        while let Some(mut current) = left_stack.pop() {
+            current.right = left;
+            current.recalc();
+            left = Some(current);
+        }
+
+        while let Some(mut current) = right_stack.pop() {
+            current.left = right;
+            current.recalc();
+            right = Some(current);
+        }
+
+        (left, right)
+    }
+
+    fn merge_nodes(&mut self, left: Link<P>, right: Link<P>) -> Link<P> {
         match (left, right) {
             (None, right) => right,
             (left, None) => left,
             (Some(mut left), Some(mut right)) => {
-                if left.higher_priority(&right) {
+                let left_size = left.size as usize;
+                let right_size = right.size as usize;
+                let total = left_size + right_size;
+                let pick = ((self.rng.next_u64() as u128 * total as u128) >> 64) as usize;
+                if pick < left_size {
                     left.push();
-                    left.right = Self::merge(left.right.take(), Some(right));
+                    left.right = self.merge_nodes(left.right.take(), Some(right));
                     left.recalc();
                     Some(left)
                 } else {
                     right.push();
-                    right.left = Self::merge(Some(left), right.left.take());
+                    right.left = self.merge_nodes(Some(left), right.left.take());
                     right.recalc();
                     Some(right)
                 }
@@ -276,7 +356,7 @@ impl<P: LazyMapMonoid> ImplicitZipTree<P> {
     }
 }
 
-impl<P> Clone for ImplicitZipTree<P>
+impl<P> Clone for ImplicitRbst<P>
 where
     P: LazyMapMonoid,
     P::Key: Clone,
@@ -292,54 +372,59 @@ where
     }
 }
 
-impl<P: LazyMapMonoid> Default for ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> Default for ImplicitRbst<P> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P: LazyMapMonoid> SequenceBase for ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> SequenceBase for ImplicitRbst<P> {
     type Key = P::Key;
 
     fn len(&self) -> usize {
-        self.len as usize
+        self.len
     }
 
     fn get(&mut self, index: usize) -> Option<&Self::Key> {
-        if index >= self.len as usize {
+        if index >= self.len {
             return None;
         }
         Self::get_node(&mut self.root, index)
     }
 
     fn insert(&mut self, index: usize, key: Self::Key) {
-        if index > self.len as usize {
+        if index > self.len {
             return;
         }
-        let node = Some(Box::new(Node::new(key, &mut self.rng)));
+        let node = Some(Box::new(Node::new(key)));
         let (left, right) = Self::split(self.root.take(), index);
-        self.root = Self::merge(Self::merge(left, node), right);
+        let merged = self.merge_nodes(left, node);
+        self.root = self.merge_nodes(merged, right);
         self.len += 1;
     }
 
     fn remove(&mut self, index: usize) -> Option<Self::Key> {
-        if index >= self.len as usize {
+        if index >= self.len {
             return None;
         }
         let (left, rest) = Self::split(self.root.take(), index);
         let (target, right) = Self::split(rest, 1);
-        self.root = Self::merge(left, right);
+        self.root = self.merge_nodes(left, right);
         self.len -= 1;
         target.map(|node| node.key)
     }
 }
 
-impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitRbst<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len as usize));
+        let (left, right) = Self::split(self.root.take(), index.min(self.len));
         self.root = left;
-        self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
-        let len = right.as_ref().map(|node| node.size).unwrap_or(0);
+        self.len = self
+            .root
+            .as_ref()
+            .map(|node| node.size as usize)
+            .unwrap_or(0);
+        let len = right.as_ref().map(|node| node.size as usize).unwrap_or(0);
         Self {
             root: right,
             len,
@@ -348,56 +433,49 @@ impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitZipTree<P> {
     }
 
     fn merge(&mut self, right: Self) {
-        self.root = Self::merge(self.root.take(), right.root);
-        self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
+        let root = self.root.take();
+        self.root = self.merge_nodes(root, right.root);
+        self.len = self
+            .root
+            .as_ref()
+            .map(|node| node.size as usize)
+            .unwrap_or(0);
     }
 }
 
-impl<P: LazyMapMonoid> SequenceAgg for ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> SequenceAgg for ImplicitRbst<P> {
     type Agg = P::Agg;
 
     fn fold<R: RangeBounds<usize>>(&mut self, range: R) -> Self::Agg {
-        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len) else {
             return P::agg_unit();
         };
         if start == end {
             return P::agg_unit();
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mid, right) = Self::split(rest, end - start);
-        let agg = mid
-            .as_ref()
-            .map(|node| node.agg.clone())
-            .unwrap_or_else(P::agg_unit);
-        self.root = Self::merge(left, Self::merge(mid, right));
-        agg
+        Self::fold_range(&mut self.root, start, end)
     }
 }
 
-impl<P: LazyMapMonoid> SequenceLazy for ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> SequenceLazy for ImplicitRbst<P> {
     type Act = P::Act;
 
     fn update<R: RangeBounds<usize>>(&mut self, range: R, act: Self::Act) {
-        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len) else {
             return;
         };
         if start == end {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
-        if let Some(node) = mid.as_deref_mut() {
-            node.apply_action(&act);
-        }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        Self::update_range(&mut self.root, start, end, &act);
     }
 }
 
-impl<P: LazyMapMonoid> SequenceReverse for ImplicitZipTree<P> {
+impl<P: LazyMapMonoid> SequenceReverse for ImplicitRbst<P> {
     fn reverse<R: RangeBounds<usize>>(&mut self, range: R) {
-        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len) else {
             return;
         };
         if start == end {
@@ -409,13 +487,14 @@ impl<P: LazyMapMonoid> SequenceReverse for ImplicitZipTree<P> {
         if let Some(node) = mid.as_deref_mut() {
             node.apply_reverse();
         }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        let merged = self.merge_nodes(mid, right);
+        self.root = self.merge_nodes(left, merged);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ImplicitZipTree;
+    use super::ImplicitRbst;
     use crate::policy::RangeSumRangeAdd;
     use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse};
     use rand::rngs::StdRng;
@@ -423,7 +502,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let mut tree = ImplicitZipTree::<RangeSumRangeAdd>::with_seed(1);
+        let mut tree = ImplicitRbst::<RangeSumRangeAdd>::new();
         for i in 0..10 {
             tree.insert(i, i as i64);
         }
@@ -436,7 +515,7 @@ mod tests {
     #[test]
     fn random_operations_match_vec() {
         let mut rng = StdRng::seed_from_u64(0x5EED_2026);
-        let mut tree = ImplicitZipTree::<RangeSumRangeAdd>::with_seed(2);
+        let mut tree = ImplicitRbst::<RangeSumRangeAdd>::new();
         let mut vec = Vec::<i64>::new();
 
         for _ in 0..2000 {

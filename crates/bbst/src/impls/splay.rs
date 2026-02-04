@@ -6,6 +6,8 @@ use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, Se
 pub struct ImplicitSplay<P: LazyMapMonoid> {
     root: Link<P>,
     len: usize,
+    left_chain: Vec<*mut Node<P>>,
+    right_chain: Vec<*mut Node<P>>,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -13,8 +15,10 @@ struct Node<P: LazyMapMonoid> {
     agg: P::Agg,
     agg_rev: P::Agg,
     lazy: P::Act,
+    lazy_pending: bool,
     rev: bool,
-    size: usize,
+    size: u32,
+    left_size: u32,
     left: Link<P>,
     right: Link<P>,
 }
@@ -34,8 +38,10 @@ where
             agg: self.agg.clone(),
             agg_rev: self.agg_rev.clone(),
             lazy: self.lazy.clone(),
+            lazy_pending: self.lazy_pending,
             rev: self.rev,
             size: self.size,
+            left_size: self.left_size,
             left: self.left.clone(),
             right: self.right.clone(),
         }
@@ -50,14 +56,16 @@ impl<P: LazyMapMonoid> Node<P> {
             agg: agg.clone(),
             agg_rev: agg,
             lazy: P::act_unit(),
+            lazy_pending: false,
             rev: false,
             size: 1,
+            left_size: 0,
             left: None,
             right: None,
         }
     }
 
-    fn size(node: &Link<P>) -> usize {
+    fn size(node: &Link<P>) -> u32 {
         node.as_ref().map(|n| n.size).unwrap_or(0)
     }
 
@@ -81,6 +89,7 @@ impl<P: LazyMapMonoid> Node<P> {
         let left_size = Self::size(&self.left);
         let right_size = Self::size(&self.right);
 
+        self.left_size = left_size;
         self.size = 1 + left_size + right_size;
         self.agg = P::agg_merge(&left_agg, &self.key, &right_agg);
         self.agg_rev = P::agg_merge(&right_rev, &self.key, &left_rev);
@@ -88,18 +97,24 @@ impl<P: LazyMapMonoid> Node<P> {
 
     fn apply_action(&mut self, act: &P::Act) {
         self.key = P::act_apply_key(&self.key, act);
-        self.agg = P::act_apply_agg(&self.agg, act, self.size);
-        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, self.size);
+        let size = self.size as usize;
+        self.agg = P::act_apply_agg(&self.agg, act, size);
+        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, size);
         self.lazy = P::act_compose(act, &self.lazy);
+        self.lazy_pending = true;
     }
 
     fn apply_reverse(&mut self) {
         self.rev = !self.rev;
         std::mem::swap(&mut self.left, &mut self.right);
         std::mem::swap(&mut self.agg, &mut self.agg_rev);
+        self.left_size = self.size - 1 - self.left_size;
     }
 
     fn push(&mut self) {
+        if !self.rev && !self.lazy_pending {
+            return;
+        }
         if self.rev {
             if let Some(left) = self.left.as_deref_mut() {
                 left.apply_reverse();
@@ -110,14 +125,19 @@ impl<P: LazyMapMonoid> Node<P> {
             self.rev = false;
         }
 
-        let act = self.lazy.clone();
-        if let Some(left) = self.left.as_deref_mut() {
-            left.apply_action(&act);
+        if self.lazy_pending {
+            if self.left.is_some() || self.right.is_some() {
+                let act = self.lazy.clone();
+                if let Some(left) = self.left.as_deref_mut() {
+                    left.apply_action(&act);
+                }
+                if let Some(right) = self.right.as_deref_mut() {
+                    right.apply_action(&act);
+                }
+            }
+            self.lazy = P::act_unit();
+            self.lazy_pending = false;
         }
-        if let Some(right) = self.right.as_deref_mut() {
-            right.apply_action(&act);
-        }
-        self.lazy = P::act_unit();
     }
 }
 
@@ -127,7 +147,12 @@ impl<P: LazyMapMonoid> ImplicitSplay<P> {
     }
 
     pub fn with_seed(_seed: u64) -> Self {
-        Self { root: None, len: 0 }
+        Self {
+            root: None,
+            len: 0,
+            left_chain: Vec::new(),
+            right_chain: Vec::new(),
+        }
     }
 
     fn normalize_range<R: RangeBounds<usize>>(range: R, len: usize) -> Option<(usize, usize)> {
@@ -177,19 +202,20 @@ impl<P: LazyMapMonoid> ImplicitSplay<P> {
         right
     }
 
-    fn splay(root: Link<P>, index: usize) -> Link<P> {
+    fn splay(&mut self, root: Link<P>, index: usize) -> Link<P> {
         let mut root = root?;
         let mut index = index;
         let mut left_head: Link<P> = None;
         let mut right_head: Link<P> = None;
         let mut left_tail: *mut Node<P> = std::ptr::null_mut();
         let mut right_tail: *mut Node<P> = std::ptr::null_mut();
-        let mut left_chain: Vec<*mut Node<P>> = Vec::new();
-        let mut right_chain: Vec<*mut Node<P>> = Vec::new();
+        let (left_chain, right_chain) = (&mut self.left_chain, &mut self.right_chain);
+        left_chain.clear();
+        right_chain.clear();
 
         loop {
             root.push();
-            let left_size = Node::size(&root.left);
+            let left_size = root.left_size as usize;
             if index < left_size {
                 if root.left.is_none() {
                     break;
@@ -200,7 +226,7 @@ impl<P: LazyMapMonoid> ImplicitSplay<P> {
                 let left_left_size = root
                     .left
                     .as_ref()
-                    .map(|left| Node::size(&left.left))
+                    .map(|left| left.left_size as usize)
                     .unwrap_or(0);
                 if index < left_left_size {
                     root = Self::rotate_right(root);
@@ -231,7 +257,7 @@ impl<P: LazyMapMonoid> ImplicitSplay<P> {
                 let right_left_size = root
                     .right
                     .as_ref()
-                    .map(|right| Node::size(&right.left))
+                    .map(|right| right.left_size as usize)
                     .unwrap_or(0);
                 if index > right_left_size {
                     root = Self::rotate_left(root);
@@ -288,11 +314,11 @@ impl<P: LazyMapMonoid> ImplicitSplay<P> {
         Some(root)
     }
 
-    fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
+    fn split_nodes(&mut self, root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
         let Some(root) = root else {
             return (None, None);
         };
-        let size = root.size;
+        let size = root.size as usize;
         if left_count == 0 {
             return (None, Some(root));
         }
@@ -300,19 +326,19 @@ impl<P: LazyMapMonoid> ImplicitSplay<P> {
             return (Some(root), None);
         }
 
-        let mut root = Self::splay(Some(root), left_count).unwrap();
+        let mut root = self.splay(Some(root), left_count).unwrap();
         let left = root.left.take();
         root.recalc();
         (left, Some(root))
     }
 
-    fn merge(left: Link<P>, right: Link<P>) -> Link<P> {
+    fn merge_nodes(&mut self, left: Link<P>, right: Link<P>) -> Link<P> {
         match (left, right) {
             (None, right) => right,
             (left, None) => left,
             (Some(left), Some(right)) => {
-                let size = left.size;
-                let mut root = Self::splay(Some(left), size - 1).unwrap();
+                let size = left.size as usize;
+                let mut root = self.splay(Some(left), size - 1).unwrap();
                 root.right = Some(right);
                 root.recalc();
                 Some(root)
@@ -332,6 +358,8 @@ where
         Self {
             root: self.root.clone(),
             len: self.len,
+            left_chain: Vec::new(),
+            right_chain: Vec::new(),
         }
     }
 }
@@ -353,7 +381,8 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitSplay<P> {
         if index >= self.len {
             return None;
         }
-        self.root = Self::splay(self.root.take(), index);
+        let root = self.root.take();
+        self.root = self.splay(root, index);
         self.root.as_ref().map(|node| &node.key)
     }
 
@@ -362,8 +391,10 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitSplay<P> {
             return;
         }
         let node = Some(Box::new(Node::new(key)));
-        let (left, right) = Self::split(self.root.take(), index);
-        self.root = Self::merge(Self::merge(left, node), right);
+        let root = self.root.take();
+        let (left, right) = self.split_nodes(root, index);
+        let merged = self.merge_nodes(left, node);
+        self.root = self.merge_nodes(merged, right);
         self.len += 1;
     }
 
@@ -371,9 +402,10 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitSplay<P> {
         if index >= self.len {
             return None;
         }
-        let (left, rest) = Self::split(self.root.take(), index);
-        let (target, right) = Self::split(rest, 1);
-        self.root = Self::merge(left, right);
+        let root = self.root.take();
+        let (left, rest) = self.split_nodes(root, index);
+        let (target, right) = self.split_nodes(rest, 1);
+        self.root = self.merge_nodes(left, right);
         self.len -= 1;
         target.map(|node| node.key)
     }
@@ -381,16 +413,31 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitSplay<P> {
 
 impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitSplay<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len));
+        let root = self.root.take();
+        let (left, right) = self.split_nodes(root, index.min(self.len));
         self.root = left;
-        self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
-        let len = right.as_ref().map(|node| node.size).unwrap_or(0);
-        Self { root: right, len }
+        self.len = self
+            .root
+            .as_ref()
+            .map(|node| node.size as usize)
+            .unwrap_or(0);
+        let len = right.as_ref().map(|node| node.size as usize).unwrap_or(0);
+        Self {
+            root: right,
+            len,
+            left_chain: Vec::new(),
+            right_chain: Vec::new(),
+        }
     }
 
     fn merge(&mut self, right: Self) {
-        self.root = Self::merge(self.root.take(), right.root);
-        self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
+        let root = self.root.take();
+        self.root = self.merge_nodes(root, right.root);
+        self.len = self
+            .root
+            .as_ref()
+            .map(|node| node.size as usize)
+            .unwrap_or(0);
     }
 }
 
@@ -405,13 +452,15 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitSplay<P> {
             return P::agg_unit();
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mid, right) = Self::split(rest, end - start);
+        let root = self.root.take();
+        let (left, rest) = self.split_nodes(root, start);
+        let (mid, right) = self.split_nodes(rest, end - start);
         let agg = mid
             .as_ref()
             .map(|node| node.agg.clone())
             .unwrap_or_else(P::agg_unit);
-        self.root = Self::merge(left, Self::merge(mid, right));
+        let merged = self.merge_nodes(mid, right);
+        self.root = self.merge_nodes(left, merged);
         agg
     }
 }
@@ -427,12 +476,14 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitSplay<P> {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
+        let root = self.root.take();
+        let (left, rest) = self.split_nodes(root, start);
+        let (mut mid, right) = self.split_nodes(rest, end - start);
         if let Some(node) = mid.as_deref_mut() {
             node.apply_action(&act);
         }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        let merged = self.merge_nodes(mid, right);
+        self.root = self.merge_nodes(left, merged);
     }
 }
 
@@ -445,12 +496,14 @@ impl<P: LazyMapMonoid> SequenceReverse for ImplicitSplay<P> {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
+        let root = self.root.take();
+        let (left, rest) = self.split_nodes(root, start);
+        let (mut mid, right) = self.split_nodes(rest, end - start);
         if let Some(node) = mid.as_deref_mut() {
             node.apply_reverse();
         }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        let merged = self.merge_nodes(mid, right);
+        self.root = self.merge_nodes(left, merged);
     }
 }
 

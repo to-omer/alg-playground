@@ -8,8 +8,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use bbst::{
-    ImplicitAaTree, ImplicitAvl, ImplicitRbTree, ImplicitSplay, ImplicitTreap, ImplicitWbt,
-    ImplicitZipTree, LazyMapMonoid, SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse,
+    ImplicitAaTree, ImplicitAvl, ImplicitRbTree, ImplicitRbst, ImplicitSplay, ImplicitTreap,
+    ImplicitWbt, ImplicitZipTree, LazyMapMonoid, SequenceAgg, SequenceBase, SequenceLazy,
+    SequenceReverse,
 };
 
 const SIZES: [usize; 5] = [1_000, 4_000, 16_000, 64_000, 256_000];
@@ -89,6 +90,12 @@ impl<P: LazyMapMonoid<Key = i64>> BenchTree<P> for ImplicitZipTree<P> {
     }
 }
 
+impl<P: LazyMapMonoid<Key = i64>> BenchTree<P> for ImplicitRbst<P> {
+    fn with_seed(seed: u64) -> Self {
+        Self::with_seed(seed)
+    }
+}
+
 impl<P: LazyMapMonoid<Key = i64>> BenchTree<P> for ImplicitAaTree<P> {
     fn with_seed(seed: u64) -> Self {
         Self::with_seed(seed)
@@ -142,6 +149,7 @@ where
         bench_tree::<ImplicitZipTree<P>, P, _>(
             &mut group, "zip", size, feature, base_seed, &initial,
         );
+        bench_tree::<ImplicitRbst<P>, P, _>(&mut group, "rbst", size, feature, base_seed, &initial);
         bench_tree::<ImplicitAaTree<P>, P, _>(&mut group, "aa", size, feature, base_seed, &initial);
         bench_tree::<ImplicitAvl<P>, P, _>(&mut group, "avl", size, feature, base_seed, &initial);
         bench_tree::<ImplicitRbTree<P>, P, _>(&mut group, "rb", size, feature, base_seed, &initial);

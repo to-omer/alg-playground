@@ -3,11 +3,11 @@ use std::ops::{Bound, RangeBounds};
 use crate::policy::LazyMapMonoid;
 use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, SequenceSplitMerge};
 
-const BALANCE_NUM: usize = 3;
+const BALANCE_NUM: usize = 16;
 
 pub struct ImplicitWbt<P: LazyMapMonoid> {
     root: Link<P>,
-    len: usize,
+    len: u32,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -15,8 +15,9 @@ struct Node<P: LazyMapMonoid> {
     agg: P::Agg,
     agg_rev: P::Agg,
     lazy: P::Act,
+    lazy_pending: bool,
     rev: bool,
-    size: usize,
+    size: u32,
     left: Link<P>,
     right: Link<P>,
 }
@@ -36,6 +37,7 @@ where
             agg: self.agg.clone(),
             agg_rev: self.agg_rev.clone(),
             lazy: self.lazy.clone(),
+            lazy_pending: self.lazy_pending,
             rev: self.rev,
             size: self.size,
             left: self.left.clone(),
@@ -52,6 +54,7 @@ impl<P: LazyMapMonoid> Node<P> {
             agg: agg.clone(),
             agg_rev: agg,
             lazy: P::act_unit(),
+            lazy_pending: false,
             rev: false,
             size: 1,
             left: None,
@@ -59,7 +62,7 @@ impl<P: LazyMapMonoid> Node<P> {
         }
     }
 
-    fn size(node: &Link<P>) -> usize {
+    fn size(node: &Link<P>) -> u32 {
         node.as_ref().map(|n| n.size).unwrap_or(0)
     }
 
@@ -90,9 +93,11 @@ impl<P: LazyMapMonoid> Node<P> {
 
     fn apply_action(&mut self, act: &P::Act) {
         self.key = P::act_apply_key(&self.key, act);
-        self.agg = P::act_apply_agg(&self.agg, act, self.size);
-        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, self.size);
+        let size = self.size as usize;
+        self.agg = P::act_apply_agg(&self.agg, act, size);
+        self.agg_rev = P::act_apply_agg(&self.agg_rev, act, size);
         self.lazy = P::act_compose(act, &self.lazy);
+        self.lazy_pending = true;
     }
 
     fn apply_reverse(&mut self) {
@@ -102,6 +107,9 @@ impl<P: LazyMapMonoid> Node<P> {
     }
 
     fn push(&mut self) {
+        if !self.rev && !self.lazy_pending {
+            return;
+        }
         if self.rev {
             if let Some(left) = self.left.as_deref_mut() {
                 left.apply_reverse();
@@ -112,14 +120,19 @@ impl<P: LazyMapMonoid> Node<P> {
             self.rev = false;
         }
 
-        let act = self.lazy.clone();
-        if let Some(left) = self.left.as_deref_mut() {
-            left.apply_action(&act);
+        if self.lazy_pending {
+            if self.left.is_some() || self.right.is_some() {
+                let act = self.lazy.clone();
+                if let Some(left) = self.left.as_deref_mut() {
+                    left.apply_action(&act);
+                }
+                if let Some(right) = self.right.as_deref_mut() {
+                    right.apply_action(&act);
+                }
+            }
+            self.lazy = P::act_unit();
+            self.lazy_pending = false;
         }
-        if let Some(right) = self.right.as_deref_mut() {
-            right.apply_action(&act);
-        }
-        self.lazy = P::act_unit();
     }
 }
 
@@ -184,7 +197,7 @@ impl<P: LazyMapMonoid> ImplicitWbt<P> {
         let left_size = Node::size(&root.left);
         let right_size = Node::size(&root.right);
 
-        if left_size > right_size * BALANCE_NUM + 1 {
+        if left_size > right_size * BALANCE_NUM as u32 + 1 {
             let mut left = root.left.take().unwrap();
             left.push();
             let left_left = Node::size(&left.left);
@@ -196,7 +209,7 @@ impl<P: LazyMapMonoid> ImplicitWbt<P> {
             return Self::rotate_right(root);
         }
 
-        if right_size > left_size * BALANCE_NUM + 1 {
+        if right_size > left_size * BALANCE_NUM as u32 + 1 {
             let mut right = root.right.take().unwrap();
             right.push();
             let right_left = Node::size(&right.left);
@@ -221,11 +234,11 @@ impl<P: LazyMapMonoid> ImplicitWbt<P> {
         if left_count == 0 {
             return (None, Some(node));
         }
-        if left_count >= node.size {
+        if left_count >= node.size as usize {
             return (Some(node), None);
         }
 
-        let left_size = Node::size(&node.left);
+        let left_size = Node::size(&node.left) as usize;
         if left_count <= left_size {
             let (left, right) = Self::split(node.left.take(), left_count);
             node.left = right;
@@ -258,15 +271,19 @@ impl<P: LazyMapMonoid> ImplicitWbt<P> {
     }
 
     fn get_node(node: &mut Link<P>, index: usize) -> Option<&P::Key> {
-        let node_ref = node.as_deref_mut()?;
-        node_ref.push();
-        let left_size = Node::size(&node_ref.left);
-        if index < left_size {
-            Self::get_node(&mut node_ref.left, index)
-        } else if index == left_size {
-            Some(&node_ref.key)
-        } else {
-            Self::get_node(&mut node_ref.right, index - left_size - 1)
+        let mut current = node.as_deref_mut()?;
+        let mut index = index;
+        loop {
+            current.push();
+            let left_size = Node::size(&current.left) as usize;
+            if index < left_size {
+                current = current.left.as_deref_mut()?;
+            } else if index == left_size {
+                return Some(&current.key);
+            } else {
+                index -= left_size + 1;
+                current = current.right.as_deref_mut()?;
+            }
         }
     }
 }
@@ -296,18 +313,18 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitWbt<P> {
     type Key = P::Key;
 
     fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     fn get(&mut self, index: usize) -> Option<&Self::Key> {
-        if index >= self.len {
+        if index >= self.len as usize {
             return None;
         }
         Self::get_node(&mut self.root, index)
     }
 
     fn insert(&mut self, index: usize, key: Self::Key) {
-        if index > self.len {
+        if index > self.len as usize {
             return;
         }
         let node = Some(Box::new(Node::new(key)));
@@ -317,7 +334,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitWbt<P> {
     }
 
     fn remove(&mut self, index: usize) -> Option<Self::Key> {
-        if index >= self.len {
+        if index >= self.len as usize {
             return None;
         }
         let (left, rest) = Self::split(self.root.take(), index);
@@ -330,7 +347,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitWbt<P> {
 
 impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitWbt<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len));
+        let (left, right) = Self::split(self.root.take(), index.min(self.len as usize));
         self.root = left;
         self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
         let len = right.as_ref().map(|node| node.size).unwrap_or(0);
@@ -347,7 +364,7 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitWbt<P> {
     type Agg = P::Agg;
 
     fn fold<R: RangeBounds<usize>>(&mut self, range: R) -> Self::Agg {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return P::agg_unit();
         };
         if start == end {
@@ -369,7 +386,7 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitWbt<P> {
     type Act = P::Act;
 
     fn update<R: RangeBounds<usize>>(&mut self, range: R, act: Self::Act) {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
         };
         if start == end {
@@ -387,7 +404,7 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitWbt<P> {
 
 impl<P: LazyMapMonoid> SequenceReverse for ImplicitWbt<P> {
     fn reverse<R: RangeBounds<usize>>(&mut self, range: R) {
-        let Some((start, end)) = Self::normalize_range(range, self.len) else {
+        let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
         };
         if start == end {

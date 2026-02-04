@@ -210,6 +210,81 @@ impl<P: LazyMapMonoid> ImplicitZipTree<P> {
         Some((start, end))
     }
 
+    fn rotate_left(mut root: Box<Node<P>>) -> Box<Node<P>> {
+        root.push();
+        let mut right = root.right.take().expect("rotate_left needs right");
+        right.push();
+        root.right = right.left.take();
+        root.recalc();
+        right.left = Some(root);
+        right.recalc();
+        right
+    }
+
+    fn rotate_right(mut root: Box<Node<P>>) -> Box<Node<P>> {
+        root.push();
+        let mut left = root.left.take().expect("rotate_right needs left");
+        left.push();
+        root.left = left.right.take();
+        root.recalc();
+        left.right = Some(root);
+        left.recalc();
+        left
+    }
+
+    fn insert_node(root: Link<P>, index: usize, key: P::Key, rng: &mut SplitMix64) -> Link<P> {
+        let mut node = match root {
+            Some(node) => node,
+            None => return Some(Box::new(Node::new(key, rng))),
+        };
+
+        node.push();
+        let left_size = node.left_size as usize;
+        if index <= left_size {
+            node.left = Self::insert_node(node.left.take(), index, key, rng);
+            if let Some(left) = node.left.as_ref()
+                && left.higher_priority(&node)
+            {
+                return Some(Self::rotate_right(node));
+            }
+        } else {
+            node.right = Self::insert_node(node.right.take(), index - left_size - 1, key, rng);
+            if let Some(right) = node.right.as_ref()
+                && right.higher_priority(&node)
+            {
+                return Some(Self::rotate_left(node));
+            }
+        }
+        node.recalc();
+        Some(node)
+    }
+
+    fn remove_node(root: Link<P>, index: usize) -> (Link<P>, Option<P::Key>) {
+        let mut node = match root {
+            Some(node) => node,
+            None => return (None, None),
+        };
+
+        node.push();
+        let left_size = node.left_size as usize;
+        if index < left_size {
+            let (left, removed) = Self::remove_node(node.left.take(), index);
+            node.left = left;
+            node.recalc();
+            return (Some(node), removed);
+        }
+        if index > left_size {
+            let (right, removed) = Self::remove_node(node.right.take(), index - left_size - 1);
+            node.right = right;
+            node.recalc();
+            return (Some(node), removed);
+        }
+
+        let removed = node.key;
+        let merged = Self::merge(node.left.take(), node.right.take());
+        (merged, Some(removed))
+    }
+
     fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
         let mut node = match root {
             Some(node) => node,
@@ -316,9 +391,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitZipTree<P> {
         if index > self.len as usize {
             return;
         }
-        let node = Some(Box::new(Node::new(key, &mut self.rng)));
-        let (left, right) = Self::split(self.root.take(), index);
-        self.root = Self::merge(Self::merge(left, node), right);
+        self.root = Self::insert_node(self.root.take(), index, key, &mut self.rng);
         self.len += 1;
     }
 
@@ -326,11 +399,10 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitZipTree<P> {
         if index >= self.len as usize {
             return None;
         }
-        let (left, rest) = Self::split(self.root.take(), index);
-        let (target, right) = Self::split(rest, 1);
-        self.root = Self::merge(left, right);
+        let (root, removed) = Self::remove_node(self.root.take(), index);
+        self.root = root;
         self.len -= 1;
-        target.map(|node| node.key)
+        removed
     }
 }
 

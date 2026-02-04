@@ -286,6 +286,248 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         left
     }
 
+    fn insert_at(node: Link<P>, index: usize, key: P::Key) -> Link<P> {
+        match node {
+            None => Some(Box::new(Node::new(key, true))),
+            Some(mut node) => {
+                node.push();
+                let left_size = Node::size(&node.left) as usize;
+                if index <= left_size {
+                    let left = node.left.take();
+                    node.left = Self::insert_at(left, index, key);
+                } else {
+                    let right = node.right.take();
+                    node.right = Self::insert_at(right, index - left_size - 1, key);
+                }
+                Some(Self::fix_up(node))
+            }
+        }
+    }
+
+    fn fix_double_black_left(mut node: Box<Node<P>>) -> (Box<Node<P>>, bool) {
+        if Self::is_red(&node.right) {
+            let mut new_root = Self::rotate_left(node);
+            if let Some(left) = new_root.left.as_deref_mut() {
+                left.red = true;
+                left.recalc_black_height();
+            }
+            new_root.red = false;
+            let left = new_root.left.take().expect("rotate_left gives left");
+            let (fixed_left, needs_fix) = Self::fix_double_black_left(left);
+            new_root.left = Some(fixed_left);
+            new_root.recalc();
+            return (new_root, needs_fix);
+        }
+
+        let sibling_left_red = node
+            .right
+            .as_ref()
+            .and_then(|sibling| sibling.left.as_ref())
+            .map(|child| child.red)
+            .unwrap_or(false);
+        let sibling_right_red = node
+            .right
+            .as_ref()
+            .and_then(|sibling| sibling.right.as_ref())
+            .map(|child| child.red)
+            .unwrap_or(false);
+
+        if !sibling_left_red && !sibling_right_red {
+            if let Some(right) = node.right.as_deref_mut() {
+                right.red = true;
+                right.recalc_black_height();
+            }
+            if node.red {
+                node.red = false;
+                node.recalc_black_height();
+                node.recalc();
+                return (node, false);
+            }
+            node.recalc_black_height();
+            node.recalc();
+            return (node, true);
+        }
+
+        let parent_red = node.red;
+        if !sibling_right_red {
+            let right = node
+                .right
+                .take()
+                .expect("fix_double_black_left needs right");
+            let right = Self::rotate_right(right);
+            node.right = Some(right);
+        }
+        let mut new_root = Self::rotate_left(node);
+        new_root.red = parent_red;
+        if let Some(left) = new_root.left.as_deref_mut() {
+            left.red = false;
+            left.recalc_black_height();
+        }
+        if let Some(right) = new_root.right.as_deref_mut() {
+            right.red = false;
+            right.recalc_black_height();
+        }
+        new_root.recalc();
+        (new_root, false)
+    }
+
+    fn fix_double_black_right(mut node: Box<Node<P>>) -> (Box<Node<P>>, bool) {
+        if Self::is_red(&node.left) {
+            let mut new_root = Self::rotate_right(node);
+            if let Some(right) = new_root.right.as_deref_mut() {
+                right.red = true;
+                right.recalc_black_height();
+            }
+            new_root.red = false;
+            let right = new_root.right.take().expect("rotate_right gives right");
+            let (fixed_right, needs_fix) = Self::fix_double_black_right(right);
+            new_root.right = Some(fixed_right);
+            new_root.recalc();
+            return (new_root, needs_fix);
+        }
+
+        let sibling_left_red = node
+            .left
+            .as_ref()
+            .and_then(|sibling| sibling.left.as_ref())
+            .map(|child| child.red)
+            .unwrap_or(false);
+        let sibling_right_red = node
+            .left
+            .as_ref()
+            .and_then(|sibling| sibling.right.as_ref())
+            .map(|child| child.red)
+            .unwrap_or(false);
+
+        if !sibling_left_red && !sibling_right_red {
+            if let Some(left) = node.left.as_deref_mut() {
+                left.red = true;
+                left.recalc_black_height();
+            }
+            if node.red {
+                node.red = false;
+                node.recalc_black_height();
+                node.recalc();
+                return (node, false);
+            }
+            node.recalc_black_height();
+            node.recalc();
+            return (node, true);
+        }
+
+        let parent_red = node.red;
+        if !sibling_left_red {
+            let left = node.left.take().expect("fix_double_black_right needs left");
+            let left = Self::rotate_left(left);
+            node.left = Some(left);
+        }
+        let mut new_root = Self::rotate_right(node);
+        new_root.red = parent_red;
+        if let Some(left) = new_root.left.as_deref_mut() {
+            left.red = false;
+            left.recalc_black_height();
+        }
+        if let Some(right) = new_root.right.as_deref_mut() {
+            right.red = false;
+            right.recalc_black_height();
+        }
+        new_root.recalc();
+        (new_root, false)
+    }
+
+    fn delete_min(mut node: Box<Node<P>>) -> (Link<P>, P::Key, bool) {
+        node.push();
+        if node.left.is_none() {
+            let right = node.right.take();
+            let key = node.key;
+            if node.red {
+                return (right, key, false);
+            }
+            if let Some(mut right) = right {
+                if right.red {
+                    right.red = false;
+                    right.recalc_black_height();
+                    return (Some(right), key, false);
+                }
+                return (Some(right), key, true);
+            }
+            return (None, key, true);
+        }
+        let left = node.left.take().expect("delete_min expects left");
+        let (new_left, key, needs_fix) = Self::delete_min(left);
+        node.left = new_left;
+        if needs_fix {
+            let (node, needs_fix) = Self::fix_double_black_left(node);
+            return (Some(node), key, needs_fix);
+        }
+        node.recalc();
+        (Some(node), key, false)
+    }
+
+    fn delete_at(node: Link<P>, index: usize) -> (Link<P>, Option<P::Key>, bool) {
+        let Some(mut node) = node else {
+            return (None, None, false);
+        };
+        node.push();
+        let left_size = Node::size(&node.left) as usize;
+        if index < left_size {
+            let left = node.left.take();
+            let (new_left, removed, needs_fix) = Self::delete_at(left, index);
+            node.left = new_left;
+            if needs_fix {
+                let (node, needs_fix) = Self::fix_double_black_left(node);
+                return (Some(node), removed, needs_fix);
+            }
+            node.recalc();
+            return (Some(node), removed, false);
+        }
+        if index > left_size {
+            let right = node.right.take();
+            let (new_right, removed, needs_fix) = Self::delete_at(right, index - left_size - 1);
+            node.right = new_right;
+            if needs_fix {
+                let (node, needs_fix) = Self::fix_double_black_right(node);
+                return (Some(node), removed, needs_fix);
+            }
+            node.recalc();
+            return (Some(node), removed, false);
+        }
+
+        match (node.left.take(), node.right.take()) {
+            (None, None) => {
+                let old_key = node.key;
+                if node.red {
+                    return (None, Some(old_key), false);
+                }
+                (None, Some(old_key), true)
+            }
+            (Some(mut child), None) | (None, Some(mut child)) => {
+                let old_key = node.key;
+                if node.red {
+                    return (Some(child), Some(old_key), false);
+                }
+                if child.red {
+                    child.red = false;
+                    child.recalc_black_height();
+                    return (Some(child), Some(old_key), false);
+                }
+                (Some(child), Some(old_key), true)
+            }
+            (Some(left), Some(right)) => {
+                node.left = Some(left);
+                let (new_right, succ_key, needs_fix) = Self::delete_min(right);
+                node.right = new_right;
+                let old_key = std::mem::replace(&mut node.key, succ_key);
+                if needs_fix {
+                    let (node, needs_fix) = Self::fix_double_black_right(node);
+                    return (Some(node), Some(old_key), needs_fix);
+                }
+                node.recalc();
+                (Some(node), Some(old_key), false)
+            }
+        }
+    }
+
     fn fix_up(mut node: Box<Node<P>>) -> Box<Node<P>> {
         if node.red {
             node.recalc();
@@ -557,8 +799,8 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
         if index > self.len as usize {
             return;
         }
-        let (left, right) = Self::split(self.root.take(), index);
-        self.root = Self::join(left, key, right);
+        self.root = Self::insert_at(self.root.take(), index, key);
+        self.root = Self::make_black(self.root.take());
         self.len += 1;
     }
 
@@ -566,10 +808,9 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
         if index >= self.len as usize {
             return None;
         }
-        let (left, rest) = Self::split(self.root.take(), index);
-        let (mid, right) = Self::split(rest, 1);
-        let removed = mid.map(|node| node.key);
-        self.root = Self::merge(left, right);
+        let (root, removed, _needs_fix) = Self::delete_at(self.root.take(), index);
+        self.root = root;
+        self.root = Self::make_black(self.root.take());
         self.len -= 1;
         removed
     }

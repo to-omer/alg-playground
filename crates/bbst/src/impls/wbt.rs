@@ -224,6 +224,66 @@ impl<P: LazyMapMonoid> ImplicitWbt<P> {
         root
     }
 
+    fn insert_node(root: Link<P>, index: usize, key: P::Key) -> Link<P> {
+        let mut node = match root {
+            Some(node) => node,
+            None => return Some(Box::new(Node::new(key))),
+        };
+
+        node.push();
+        let left_size = Node::size(&node.left) as usize;
+        if index <= left_size {
+            node.left = Self::insert_node(node.left.take(), index, key);
+        } else {
+            node.right = Self::insert_node(node.right.take(), index - left_size - 1, key);
+        }
+        Some(Self::rebalance(node))
+    }
+
+    fn remove_min(mut node: Box<Node<P>>) -> (Link<P>, P::Key) {
+        node.push();
+        if node.left.is_none() {
+            return (node.right.take(), node.key);
+        }
+        let (left, key) = Self::remove_min(node.left.take().unwrap());
+        node.left = left;
+        let node = Self::rebalance(node);
+        (Some(node), key)
+    }
+
+    fn remove_node(root: Link<P>, index: usize) -> (Link<P>, Option<P::Key>) {
+        let mut node = match root {
+            Some(node) => node,
+            None => return (None, None),
+        };
+
+        node.push();
+        let left_size = Node::size(&node.left) as usize;
+        if index < left_size {
+            let (left, removed) = Self::remove_node(node.left.take(), index);
+            node.left = left;
+            return (Some(Self::rebalance(node)), removed);
+        }
+        if index > left_size {
+            let (right, removed) = Self::remove_node(node.right.take(), index - left_size - 1);
+            node.right = right;
+            return (Some(Self::rebalance(node)), removed);
+        }
+
+        let removed = node.key;
+        if node.left.is_none() {
+            return (node.right.take(), Some(removed));
+        }
+        if node.right.is_none() {
+            return (node.left.take(), Some(removed));
+        }
+
+        let (right, successor) = Self::remove_min(node.right.take().unwrap());
+        node.right = right;
+        node.key = successor;
+        (Some(Self::rebalance(node)), Some(removed))
+    }
+
     fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
         let mut node = match root {
             Some(node) => node,
@@ -327,9 +387,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitWbt<P> {
         if index > self.len as usize {
             return;
         }
-        let node = Some(Box::new(Node::new(key)));
-        let (left, right) = Self::split(self.root.take(), index);
-        self.root = Self::merge(Self::merge(left, node), right);
+        self.root = Self::insert_node(self.root.take(), index, key);
         self.len += 1;
     }
 
@@ -337,11 +395,10 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitWbt<P> {
         if index >= self.len as usize {
             return None;
         }
-        let (left, rest) = Self::split(self.root.take(), index);
-        let (target, right) = Self::split(rest, 1);
-        self.root = Self::merge(left, right);
+        let (root, removed) = Self::remove_node(self.root.take(), index);
+        self.root = root;
         self.len -= 1;
-        target.map(|node| node.key)
+        removed
     }
 }
 

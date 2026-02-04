@@ -390,11 +390,29 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitSplay<P> {
         if index > self.len {
             return;
         }
-        let node = Some(Box::new(Node::new(key)));
-        let root = self.root.take();
-        let (left, right) = self.split_nodes(root, index);
-        let merged = self.merge_nodes(left, node);
-        self.root = self.merge_nodes(merged, right);
+        let mut new_node = Box::new(Node::new(key));
+        let Some(root) = self.root.take() else {
+            self.root = Some(new_node);
+            self.len += 1;
+            return;
+        };
+        if index == self.len {
+            let root = self
+                .splay(Some(root), self.len - 1)
+                .expect("non-empty root");
+            new_node.left = Some(root);
+            new_node.recalc();
+            self.root = Some(new_node);
+            self.len += 1;
+            return;
+        }
+        let mut root = self.splay(Some(root), index).expect("index within bounds");
+        let left = root.left.take();
+        root.recalc();
+        new_node.left = left;
+        new_node.right = Some(root);
+        new_node.recalc();
+        self.root = Some(new_node);
         self.len += 1;
     }
 
@@ -403,11 +421,21 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitSplay<P> {
             return None;
         }
         let root = self.root.take();
-        let (left, rest) = self.split_nodes(root, index);
-        let (target, right) = self.split_nodes(rest, 1);
-        self.root = self.merge_nodes(left, right);
+        let mut root = self.splay(root, index)?;
+        let left = root.left.take();
+        let right = root.right.take();
+        let removed = root.key;
+        self.root = if let Some(left) = left {
+            let size = left.size as usize;
+            let mut new_root = self.splay(Some(left), size - 1).expect("left non-empty");
+            new_root.right = right;
+            new_root.recalc();
+            Some(new_root)
+        } else {
+            right
+        };
         self.len -= 1;
-        target.map(|node| node.key)
+        Some(removed)
     }
 }
 

@@ -322,6 +322,81 @@ impl<P: LazyMapMonoid> ImplicitTreap<P> {
         }
     }
 
+    fn rotate_left(mut root: Box<Node<P>>) -> Box<Node<P>> {
+        root.push();
+        let mut right = root.right.take().expect("rotate_left needs right");
+        right.push();
+        root.right = right.left.take();
+        root.recalc();
+        right.left = Some(root);
+        right.recalc();
+        right
+    }
+
+    fn rotate_right(mut root: Box<Node<P>>) -> Box<Node<P>> {
+        root.push();
+        let mut left = root.left.take().expect("rotate_right needs left");
+        left.push();
+        root.left = left.right.take();
+        root.recalc();
+        left.right = Some(root);
+        left.recalc();
+        left
+    }
+
+    fn insert_node(root: Link<P>, index: usize, node: Box<Node<P>>) -> Link<P> {
+        let mut root = match root {
+            Some(root) => root,
+            None => return Some(node),
+        };
+
+        root.push();
+        let left_size = root.left_size as usize;
+        if index <= left_size {
+            root.left = Self::insert_node(root.left.take(), index, node);
+            if let Some(left) = root.left.as_ref()
+                && left.prio > root.prio
+            {
+                return Some(Self::rotate_right(root));
+            }
+        } else {
+            root.right = Self::insert_node(root.right.take(), index - left_size - 1, node);
+            if let Some(right) = root.right.as_ref()
+                && right.prio > root.prio
+            {
+                return Some(Self::rotate_left(root));
+            }
+        }
+        root.recalc();
+        Some(root)
+    }
+
+    fn remove_node(root: Link<P>, index: usize) -> (Link<P>, Option<P::Key>) {
+        let mut root = match root {
+            Some(root) => root,
+            None => return (None, None),
+        };
+
+        root.push();
+        let left_size = root.left_size as usize;
+        if index < left_size {
+            let (left, removed) = Self::remove_node(root.left.take(), index);
+            root.left = left;
+            root.recalc();
+            return (Some(root), removed);
+        }
+        if index > left_size {
+            let (right, removed) = Self::remove_node(root.right.take(), index - left_size - 1);
+            root.right = right;
+            root.recalc();
+            return (Some(root), removed);
+        }
+
+        let removed = root.key;
+        let merged = Self::merge(root.left.take(), root.right.take());
+        (merged, Some(removed))
+    }
+
     fn get_node(node: &mut Link<P>, index: usize) -> Option<&P::Key> {
         let node_ref = node.as_deref_mut()?;
         node_ref.push();
@@ -377,9 +452,8 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitTreap<P> {
             return;
         }
         let prio = self.rng.next_u64() as u32;
-        let node = Some(Box::new(Node::new(key, prio)));
-        let (left, right) = Self::split(self.root.take(), index);
-        self.root = Self::merge(Self::merge(left, node), right);
+        let node = Box::new(Node::new(key, prio));
+        self.root = Self::insert_node(self.root.take(), index, node);
         self.len += 1;
     }
 
@@ -388,11 +462,10 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitTreap<P> {
             return None;
         }
 
-        let (left, rest) = Self::split(self.root.take(), index);
-        let (target, right) = Self::split(rest, 1);
-        self.root = Self::merge(left, right);
+        let (root, removed) = Self::remove_node(self.root.take(), index);
+        self.root = root;
         self.len -= 1;
-        target.map(|node| node.key)
+        removed
     }
 }
 

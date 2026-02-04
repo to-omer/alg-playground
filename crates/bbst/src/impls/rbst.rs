@@ -338,6 +338,99 @@ impl<P: LazyMapMonoid> ImplicitRbst<P> {
         }
     }
 
+    fn rotate_left(mut root: Box<Node<P>>) -> Box<Node<P>> {
+        root.push();
+        let mut right = root.right.take().expect("rotate_left needs right");
+        right.push();
+        root.right = right.left.take();
+        root.recalc();
+        right.left = Some(root);
+        right.recalc();
+        right
+    }
+
+    fn rotate_right(mut root: Box<Node<P>>) -> Box<Node<P>> {
+        root.push();
+        let mut left = root.left.take().expect("rotate_right needs left");
+        left.push();
+        root.left = left.right.take();
+        root.recalc();
+        left.right = Some(root);
+        left.recalc();
+        left
+    }
+
+    fn insert_root(root: Link<P>, index: usize, key: P::Key) -> Link<P> {
+        let mut root = match root {
+            Some(root) => root,
+            None => return Some(Box::new(Node::new(key))),
+        };
+
+        root.push();
+        let left_size = root.left_size as usize;
+        if index <= left_size {
+            root.left = Self::insert_root(root.left.take(), index, key);
+            return Some(Self::rotate_right(root));
+        }
+
+        root.right = Self::insert_root(root.right.take(), index - left_size - 1, key);
+        Some(Self::rotate_left(root))
+    }
+
+    fn insert_node(&mut self, root: Link<P>, index: usize, key: P::Key) -> Link<P> {
+        let mut root = match root {
+            Some(root) => root,
+            None => return Some(Box::new(Node::new(key))),
+        };
+
+        root.push();
+        let left_size = root.left_size as usize;
+        let total = root.size as u64 + 1;
+        let pick = ((self.rng.next_u64() as u128 * total as u128) >> 64) as u64;
+        if pick == 0 {
+            if index <= left_size {
+                root.left = Self::insert_root(root.left.take(), index, key);
+                return Some(Self::rotate_right(root));
+            }
+            root.right = Self::insert_root(root.right.take(), index - left_size - 1, key);
+            return Some(Self::rotate_left(root));
+        }
+
+        if index <= left_size {
+            root.left = self.insert_node(root.left.take(), index, key);
+        } else {
+            root.right = self.insert_node(root.right.take(), index - left_size - 1, key);
+        }
+        root.recalc();
+        Some(root)
+    }
+
+    fn remove_node(&mut self, root: Link<P>, index: usize) -> (Link<P>, Option<P::Key>) {
+        let mut root = match root {
+            Some(root) => root,
+            None => return (None, None),
+        };
+
+        root.push();
+        let left_size = root.left_size as usize;
+        if index < left_size {
+            let (left, removed) = self.remove_node(root.left.take(), index);
+            root.left = left;
+            root.recalc();
+            return (Some(root), removed);
+        }
+        if index > left_size {
+            let (right, removed) = self.remove_node(root.right.take(), index - left_size - 1);
+            root.right = right;
+            root.recalc();
+            return (Some(root), removed);
+        }
+
+        let removed = root.key;
+        let merged = self.merge_nodes(root.left.take(), root.right.take());
+        (merged, Some(removed))
+    }
+
     fn get_node(node: &mut Link<P>, index: usize) -> Option<&P::Key> {
         let mut current = node.as_deref_mut()?;
         let mut index = index;
@@ -396,10 +489,8 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbst<P> {
         if index > self.len {
             return;
         }
-        let node = Some(Box::new(Node::new(key)));
-        let (left, right) = Self::split(self.root.take(), index);
-        let merged = self.merge_nodes(left, node);
-        self.root = self.merge_nodes(merged, right);
+        let root = self.root.take();
+        self.root = self.insert_node(root, index, key);
         self.len += 1;
     }
 
@@ -407,11 +498,11 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbst<P> {
         if index >= self.len {
             return None;
         }
-        let (left, rest) = Self::split(self.root.take(), index);
-        let (target, right) = Self::split(rest, 1);
-        self.root = self.merge_nodes(left, right);
+        let root = self.root.take();
+        let (root, removed) = self.remove_node(root, index);
+        self.root = root;
         self.len -= 1;
-        target.map(|node| node.key)
+        removed
     }
 }
 

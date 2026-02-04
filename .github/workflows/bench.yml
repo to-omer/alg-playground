@@ -52,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [discover, bench]
     steps:
+      - uses: actions/checkout@v4
       - name: Download Criterion artifacts
         uses: actions/download-artifact@v4
         with:

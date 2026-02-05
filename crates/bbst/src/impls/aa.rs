@@ -197,7 +197,6 @@ impl<P: LazyMapMonoid> ImplicitAaTree<P> {
         if left_level == node.level {
             return Self::rotate_right(node);
         }
-        node.recalc();
         node
     }
 
@@ -214,7 +213,6 @@ impl<P: LazyMapMonoid> ImplicitAaTree<P> {
             node.level += 1;
             return node;
         }
-        node.recalc();
         node
     }
 

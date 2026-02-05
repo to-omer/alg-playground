@@ -298,18 +298,46 @@ impl<P: LazyMapMonoid> ImplicitWbt<P> {
             return (Some(node), None);
         }
 
-        let left_size = Node::size(&node.left) as usize;
-        if left_count <= left_size {
-            let (left, right) = Self::split(node.left.take(), left_count);
-            node.left = right;
-            let node = Self::rebalance(node);
-            (left, Some(node))
-        } else {
-            let (left, right) = Self::split(node.right.take(), left_count - left_size - 1);
+        let mut left_count = left_count;
+        let mut left_stack: Vec<Box<Node<P>>> = Vec::new();
+        let mut right_stack: Vec<Box<Node<P>>> = Vec::new();
+        let mut current = Some(node);
+        let mut first = true;
+
+        while let Some(mut node) = current {
+            if !first {
+                node.push();
+            } else {
+                first = false;
+            }
+            let left_size = Node::size(&node.left) as usize;
+            if left_count <= left_size {
+                let next = node.left.take();
+                right_stack.push(node);
+                current = next;
+            } else {
+                left_count -= left_size + 1;
+                let next = node.right.take();
+                left_stack.push(node);
+                current = next;
+            }
+        }
+
+        let mut left = None;
+        while let Some(mut node) = left_stack.pop() {
             node.right = left;
             let node = Self::rebalance(node);
-            (Some(node), right)
+            left = Some(node);
         }
+
+        let mut right = None;
+        while let Some(mut node) = right_stack.pop() {
+            node.left = right;
+            let node = Self::rebalance(node);
+            right = Some(node);
+        }
+
+        (left, right)
     }
 
     fn merge(left: Link<P>, right: Link<P>) -> Link<P> {

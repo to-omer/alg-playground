@@ -708,24 +708,41 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
     }
 
     fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
-        let mut node = match root {
-            Some(node) => node,
-            None => return (None, None),
-        };
+        let mut node = root;
+        let mut left_count = left_count;
+        let mut left_stack: Vec<Box<Node<P>>> = Vec::new();
+        let mut right_stack: Vec<Box<Node<P>>> = Vec::new();
 
-        node.push();
-        let left_size = Node::size(&node.left) as usize;
-        if left_count <= left_size {
-            let (left, right) = Self::split(node.left.take(), left_count);
-            node.left = right;
-            let node = Self::fix_up(node);
-            (left, Some(node))
-        } else {
-            let (left, right) = Self::split(node.right.take(), left_count - left_size - 1);
-            node.right = left;
-            let node = Self::fix_up(node);
-            (Some(node), right)
+        while let Some(mut current) = node {
+            current.push();
+            let left_size = Node::size(&current.left) as usize;
+            if left_count <= left_size {
+                let next = current.left.take();
+                right_stack.push(current);
+                node = next;
+            } else {
+                left_count -= left_size + 1;
+                let next = current.right.take();
+                left_stack.push(current);
+                node = next;
+            }
         }
+
+        let mut left = None;
+        while let Some(mut current) = left_stack.pop() {
+            current.right = left;
+            let current = Self::fix_up(current);
+            left = Some(current);
+        }
+
+        let mut right = None;
+        while let Some(mut current) = right_stack.pop() {
+            current.left = right;
+            let current = Self::fix_up(current);
+            right = Some(current);
+        }
+
+        (left, right)
     }
 
     fn merge(left: Link<P>, right: Link<P>) -> Link<P> {

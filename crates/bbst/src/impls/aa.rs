@@ -169,6 +169,80 @@ impl<P: LazyMapMonoid> ImplicitAaTree<P> {
         Some((start, end))
     }
 
+    fn fold_range(node: &mut Link<P>, start: usize, end: usize) -> P::Agg {
+        if start >= end {
+            return P::agg_unit();
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return P::agg_unit();
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            return node_ref.agg.clone();
+        }
+
+        node_ref.push();
+        let left_size = Node::size(&node_ref.left) as usize;
+        if end <= left_size {
+            return Self::fold_range(&mut node_ref.left, start, end);
+        }
+        if start > left_size {
+            return Self::fold_range(
+                &mut node_ref.right,
+                start - left_size - 1,
+                end - left_size - 1,
+            );
+        }
+
+        let left_agg = if start < left_size {
+            Self::fold_range(&mut node_ref.left, start, left_size)
+        } else {
+            P::agg_unit()
+        };
+        let right_agg = if end > left_size + 1 {
+            Self::fold_range(&mut node_ref.right, 0, end - left_size - 1)
+        } else {
+            P::agg_unit()
+        };
+
+        P::agg_merge(&left_agg, &node_ref.key, &right_agg)
+    }
+
+    fn update_range(node: &mut Link<P>, start: usize, end: usize, act: &P::Act) {
+        if start >= end {
+            return;
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return;
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            node_ref.apply_action(act);
+            return;
+        }
+
+        node_ref.push();
+        let left_size = Node::size(&node_ref.left) as usize;
+        if start < left_size {
+            let left_end = left_size.min(end);
+            Self::update_range(&mut node_ref.left, start, left_end, act);
+        }
+        if start <= left_size && end > left_size {
+            node_ref.key = P::act_apply_key(&node_ref.key, act);
+        }
+        if end > left_size + 1 {
+            let right_start = if start > left_size + 1 {
+                start - left_size - 1
+            } else {
+                0
+            };
+            let right_end = end - left_size - 1;
+            Self::update_range(&mut node_ref.right, right_start, right_end, act);
+        }
+
+        node_ref.recalc();
+    }
+
     fn rotate_right(mut root: Box<Node<P>>) -> Box<Node<P>> {
         root.push();
         let mut left = root.left.take().expect("rotate_right needs left");
@@ -486,14 +560,7 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitAaTree<P> {
             return P::agg_unit();
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mid, right) = Self::split(rest, end - start);
-        let agg = mid
-            .as_ref()
-            .map(|node| node.agg.clone())
-            .unwrap_or_else(P::agg_unit);
-        self.root = Self::merge(left, Self::merge(mid, right));
-        agg
+        Self::fold_range(&mut self.root, start, end)
     }
 }
 
@@ -508,12 +575,7 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitAaTree<P> {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
-        if let Some(node) = mid.as_deref_mut() {
-            node.apply_action(&act);
-        }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        Self::update_range(&mut self.root, start, end, &act);
     }
 }
 

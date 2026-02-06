@@ -6,6 +6,8 @@ use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, Se
 pub struct ImplicitAvl<P: LazyMapMonoid> {
     root: Link<P>,
     len: usize,
+    split_left_stack: Vec<Box<Node<P>>>,
+    split_right_stack: Vec<Box<Node<P>>>,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -150,7 +152,12 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
     }
 
     pub fn with_seed(_seed: u64) -> Self {
-        Self { root: None, len: 0 }
+        Self {
+            root: None,
+            len: 0,
+            split_left_stack: Vec::with_capacity(64),
+            split_right_stack: Vec::with_capacity(64),
+        }
     }
 
     fn normalize_range<R: RangeBounds<usize>>(range: R, len: usize) -> Option<(usize, usize)> {
@@ -170,6 +177,80 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
         }
 
         Some((start, end))
+    }
+
+    fn fold_range(node: &mut Link<P>, start: usize, end: usize) -> P::Agg {
+        if start >= end {
+            return P::agg_unit();
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return P::agg_unit();
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            return node_ref.agg.clone();
+        }
+
+        node_ref.push();
+        let left_size = Node::size(&node_ref.left) as usize;
+        if end <= left_size {
+            return Self::fold_range(&mut node_ref.left, start, end);
+        }
+        if start > left_size {
+            return Self::fold_range(
+                &mut node_ref.right,
+                start - left_size - 1,
+                end - left_size - 1,
+            );
+        }
+
+        let left_agg = if start < left_size {
+            Self::fold_range(&mut node_ref.left, start, left_size)
+        } else {
+            P::agg_unit()
+        };
+        let right_agg = if end > left_size + 1 {
+            Self::fold_range(&mut node_ref.right, 0, end - left_size - 1)
+        } else {
+            P::agg_unit()
+        };
+
+        P::agg_merge(&left_agg, &node_ref.key, &right_agg)
+    }
+
+    fn update_range(node: &mut Link<P>, start: usize, end: usize, act: &P::Act) {
+        if start >= end {
+            return;
+        }
+        let Some(node_ref) = node.as_deref_mut() else {
+            return;
+        };
+        let size = node_ref.size as usize;
+        if start == 0 && end == size {
+            node_ref.apply_action(act);
+            return;
+        }
+
+        node_ref.push();
+        let left_size = Node::size(&node_ref.left) as usize;
+        if start < left_size {
+            let left_end = left_size.min(end);
+            Self::update_range(&mut node_ref.left, start, left_end, act);
+        }
+        if start <= left_size && end > left_size {
+            node_ref.key = P::act_apply_key(&node_ref.key, act);
+        }
+        if end > left_size + 1 {
+            let right_start = if start > left_size + 1 {
+                start - left_size - 1
+            } else {
+                0
+            };
+            let right_end = end - left_size - 1;
+            Self::update_range(&mut node_ref.right, right_start, right_end, act);
+        }
+
+        node_ref.recalc();
     }
 
     fn rotate_right(mut root: Box<Node<P>>) -> Box<Node<P>> {
@@ -279,7 +360,10 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
         (Some(Self::rebalance(node)), Some(removed))
     }
 
-    fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
+    fn split_nodes(&mut self, root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
+        self.split_left_stack.clear();
+        self.split_right_stack.clear();
+
         let mut node = match root {
             Some(node) => node,
             None => return (None, None),
@@ -294,8 +378,6 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
         }
 
         let mut left_count = left_count;
-        let mut left_stack: Vec<Box<Node<P>>> = Vec::new();
-        let mut right_stack: Vec<Box<Node<P>>> = Vec::new();
         let mut current = Some(node);
         let mut first = true;
 
@@ -308,25 +390,25 @@ impl<P: LazyMapMonoid> ImplicitAvl<P> {
             let left_size = Node::size(&node.left) as usize;
             if left_count <= left_size {
                 let next = node.left.take();
-                right_stack.push(node);
+                self.split_right_stack.push(node);
                 current = next;
             } else {
                 left_count -= left_size + 1;
                 let next = node.right.take();
-                left_stack.push(node);
+                self.split_left_stack.push(node);
                 current = next;
             }
         }
 
         let mut left = None;
-        while let Some(mut node) = left_stack.pop() {
+        while let Some(mut node) = self.split_left_stack.pop() {
             node.right = left;
             let node = Self::rebalance(node);
             left = Some(node);
         }
 
         let mut right = None;
-        while let Some(mut node) = right_stack.pop() {
+        while let Some(mut node) = self.split_right_stack.pop() {
             node.left = right;
             let node = Self::rebalance(node);
             right = Some(node);
@@ -382,6 +464,8 @@ where
         Self {
             root: self.root.clone(),
             len: self.len,
+            split_left_stack: Vec::new(),
+            split_right_stack: Vec::new(),
         }
     }
 }
@@ -427,7 +511,8 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitAvl<P> {
 
 impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitAvl<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len));
+        let root = self.root.take();
+        let (left, right) = self.split_nodes(root, index.min(self.len));
         self.root = left;
         self.len = self
             .root
@@ -435,7 +520,12 @@ impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitAvl<P> {
             .map(|node| node.size as usize)
             .unwrap_or(0);
         let len = right.as_ref().map(|node| node.size as usize).unwrap_or(0);
-        Self { root: right, len }
+        Self {
+            root: right,
+            len,
+            split_left_stack: Vec::with_capacity(64),
+            split_right_stack: Vec::with_capacity(64),
+        }
     }
 
     fn merge(&mut self, right: Self) {
@@ -459,14 +549,7 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitAvl<P> {
             return P::agg_unit();
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mid, right) = Self::split(rest, end - start);
-        let agg = mid
-            .as_ref()
-            .map(|node| node.agg.clone())
-            .unwrap_or_else(P::agg_unit);
-        self.root = Self::merge(left, Self::merge(mid, right));
-        agg
+        Self::fold_range(&mut self.root, start, end)
     }
 }
 
@@ -481,12 +564,7 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitAvl<P> {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
-        if let Some(node) = mid.as_deref_mut() {
-            node.apply_action(&act);
-        }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        Self::update_range(&mut self.root, start, end, &act);
     }
 }
 
@@ -499,8 +577,9 @@ impl<P: LazyMapMonoid> SequenceReverse for ImplicitAvl<P> {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
+        let root = self.root.take();
+        let (left, rest) = self.split_nodes(root, start);
+        let (mut mid, right) = self.split_nodes(rest, end - start);
         if let Some(node) = mid.as_deref_mut() {
             node.apply_reverse();
         }

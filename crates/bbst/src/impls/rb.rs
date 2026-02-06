@@ -6,6 +6,8 @@ use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, Se
 pub struct ImplicitRbTree<P: LazyMapMonoid> {
     root: Link<P>,
     len: u32,
+    split_left_stack: Vec<Box<Node<P>>>,
+    split_right_stack: Vec<Box<Node<P>>>,
 }
 
 struct Node<P: LazyMapMonoid> {
@@ -154,7 +156,12 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
     }
 
     pub fn with_seed(_seed: u64) -> Self {
-        Self { root: None, len: 0 }
+        Self {
+            root: None,
+            len: 0,
+            split_left_stack: Vec::with_capacity(64),
+            split_right_stack: Vec::with_capacity(64),
+        }
     }
 
     fn normalize_range<R: RangeBounds<usize>>(range: R, len: usize) -> Option<(usize, usize)> {
@@ -606,137 +613,149 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         node
     }
 
-    fn join_left(
+    fn join_left_node(
         mut left: Box<Node<P>>,
-        key: P::Key,
+        mut pivot: Box<Node<P>>,
         right: Link<P>,
         target_bh: u8,
     ) -> Box<Node<P>> {
         left.push();
         let right_bh = left.right.as_ref().map(|n| n.black_height).unwrap_or(0);
         if right_bh == target_bh {
-            let mut node = Box::new(Node::new(key, true));
-            node.left = left.right.take();
-            node.right = right;
-            node.recalc();
-            left.right = Some(node);
+            pivot.red = true;
+            pivot.left = left.right.take();
+            pivot.right = right;
+            pivot.recalc();
+            left.right = Some(pivot);
             return Self::fix_up(left);
         }
         if left.right.is_none() {
-            let mut node = Box::new(Node::new(key, true));
-            node.left = None;
-            node.right = right;
-            node.recalc();
-            left.right = Some(node);
+            pivot.red = true;
+            pivot.left = None;
+            pivot.right = right;
+            pivot.recalc();
+            left.right = Some(pivot);
             return Self::fix_up(left);
         }
-        let right_child = left.right.take().expect("join_left expects right spine");
-        let merged = Self::join_left(right_child, key, right, target_bh);
+        let right_child = left
+            .right
+            .take()
+            .expect("join_left_node expects right spine");
+        let merged = Self::join_left_node(right_child, pivot, right, target_bh);
         left.right = Some(merged);
         Self::fix_up(left)
     }
 
-    fn join_right(
+    fn join_right_node(
         mut right: Box<Node<P>>,
-        key: P::Key,
+        mut pivot: Box<Node<P>>,
         left: Link<P>,
         target_bh: u8,
     ) -> Box<Node<P>> {
         right.push();
         let left_bh = right.left.as_ref().map(|n| n.black_height).unwrap_or(0);
         if left_bh == target_bh {
-            let mut node = Box::new(Node::new(key, true));
-            node.left = left;
-            node.right = right.left.take();
-            node.recalc();
-            right.left = Some(node);
+            pivot.red = true;
+            pivot.left = left;
+            pivot.right = right.left.take();
+            pivot.recalc();
+            right.left = Some(pivot);
             return Self::fix_up(right);
         }
         if right.left.is_none() {
-            let mut node = Box::new(Node::new(key, true));
-            node.left = left;
-            node.right = None;
-            node.recalc();
-            right.left = Some(node);
+            pivot.red = true;
+            pivot.left = left;
+            pivot.right = None;
+            pivot.recalc();
+            right.left = Some(pivot);
             return Self::fix_up(right);
         }
-        let left_child = right.left.take().expect("join_right expects left spine");
-        let merged = Self::join_right(left_child, key, left, target_bh);
+        let left_child = right
+            .left
+            .take()
+            .expect("join_right_node expects left spine");
+        let merged = Self::join_right_node(left_child, pivot, left, target_bh);
         right.left = Some(merged);
         Self::fix_up(right)
     }
 
-    fn join(left: Link<P>, key: P::Key, right: Link<P>) -> Link<P> {
+    fn join_with_node(left: Link<P>, mut pivot: Box<Node<P>>, right: Link<P>) -> Link<P> {
+        pivot.push();
         match (left, right) {
-            (None, None) => Some(Box::new(Node::new(key, false))),
+            (None, None) => {
+                pivot.red = false;
+                pivot.left = None;
+                pivot.right = None;
+                pivot.recalc();
+                Some(pivot)
+            }
             (None, Some(right)) => {
-                let merged = Self::join_right(right, key, None, 0);
+                let merged = Self::join_right_node(right, pivot, None, 0);
                 Self::make_black(Some(merged))
             }
             (Some(left), None) => {
-                let merged = Self::join_left(left, key, None, 0);
+                let merged = Self::join_left_node(left, pivot, None, 0);
                 Self::make_black(Some(merged))
             }
             (Some(left), Some(right)) => {
                 let bh_left = left.black_height;
                 let bh_right = right.black_height;
                 if bh_left == bh_right {
-                    let mut node = Box::new(Node::new(key, true));
-                    node.left = Some(left);
-                    node.right = Some(right);
-                    node.recalc();
-                    Self::make_black(Some(Self::fix_up(node)))
+                    pivot.red = true;
+                    pivot.left = Some(left);
+                    pivot.right = Some(right);
+                    pivot.recalc();
+                    Self::make_black(Some(Self::fix_up(pivot)))
                 } else if bh_left > bh_right {
-                    let merged = Self::join_left(left, key, Some(right), bh_right);
+                    let merged = Self::join_left_node(left, pivot, Some(right), bh_right);
                     Self::make_black(Some(merged))
                 } else {
-                    let merged = Self::join_right(right, key, Some(left), bh_left);
+                    let merged = Self::join_right_node(right, pivot, Some(left), bh_left);
                     Self::make_black(Some(merged))
                 }
             }
         }
     }
 
-    fn pop_last(root: Link<P>) -> (Link<P>, Option<P::Key>) {
-        let len = Node::size(&root) as usize;
+    fn pop_last(&mut self, root: Link<P>) -> (Link<P>, Option<Box<Node<P>>>) {
+        let len = root.as_ref().map(|node| node.size).unwrap_or(0) as usize;
         if len == 0 {
             return (None, None);
         }
-        let (left, right) = Self::split(root, len - 1);
-        let key = right.map(|node| node.key);
-        (left, key)
+        let (left, pivot) = self.split_nodes(root, len - 1);
+        (left, pivot)
     }
 
-    fn split(root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
+    fn split_nodes(&mut self, root: Link<P>, left_count: usize) -> (Link<P>, Link<P>) {
         let mut node = root;
         let mut left_count = left_count;
-        let mut left_stack: Vec<Box<Node<P>>> = Vec::new();
-        let mut right_stack: Vec<Box<Node<P>>> = Vec::new();
+        self.split_left_stack.clear();
+        self.split_right_stack.clear();
 
         while let Some(mut current) = node {
             current.push();
             let left_size = Node::size(&current.left) as usize;
             if left_count <= left_size {
                 let next = current.left.take();
-                right_stack.push(current);
+                self.split_right_stack.push(current);
                 node = next;
             } else {
                 left_count -= left_size + 1;
                 let next = current.right.take();
-                left_stack.push(current);
+                self.split_left_stack.push(current);
                 node = next;
             }
         }
 
         let mut left = None;
-        while let Some(mut current) = left_stack.pop() {
+        while let Some(mut current) = self.split_left_stack.pop() {
             current.right = left;
             let current = Self::fix_up(current);
             left = Some(current);
         }
 
         let mut right = None;
-        while let Some(mut current) = right_stack.pop() {
+        while let Some(mut current) = self.split_right_stack.pop() {
             current.left = right;
             let current = Self::fix_up(current);
             right = Some(current);
@@ -745,14 +764,14 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
         (left, right)
     }
 
-    fn merge(left: Link<P>, right: Link<P>) -> Link<P> {
+    fn merge_nodes(&mut self, left: Link<P>, right: Link<P>) -> Link<P> {
         match (left, right) {
             (None, right) => right,
             (left, None) => left,
             (Some(left), Some(right)) => {
-                let (left, key) = Self::pop_last(Some(left));
-                match key {
-                    Some(key) => Self::join(left, key, Some(right)),
+                let (left, pivot) = self.pop_last(Some(left));
+                match pivot {
+                    Some(pivot) => Self::join_with_node(left, pivot, Some(right)),
                     None => Some(right),
                 }
             }
@@ -788,6 +807,8 @@ where
         Self {
             root: self.root.clone(),
             len: self.len,
+            split_left_stack: Vec::new(),
+            split_right_stack: Vec::new(),
         }
     }
 }
@@ -835,16 +856,23 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
 
 impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitRbTree<P> {
     fn split_at(&mut self, index: usize) -> Self {
-        let (left, right) = Self::split(self.root.take(), index.min(self.len as usize));
+        let root = self.root.take();
+        let (left, right) = self.split_nodes(root, index.min(self.len as usize));
         self.root = Self::make_black(left);
         self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
         let right = Self::make_black(right);
         let len = right.as_ref().map(|node| node.size).unwrap_or(0);
-        Self { root: right, len }
+        Self {
+            root: right,
+            len,
+            split_left_stack: Vec::with_capacity(64),
+            split_right_stack: Vec::with_capacity(64),
+        }
     }
 
     fn merge(&mut self, right: Self) {
-        self.root = Self::merge(self.root.take(), right.root);
+        let left = self.root.take();
+        self.root = self.merge_nodes(left, right.root);
         self.len = self.root.as_ref().map(|node| node.size).unwrap_or(0);
     }
 }
@@ -888,12 +916,14 @@ impl<P: LazyMapMonoid> SequenceReverse for ImplicitRbTree<P> {
             return;
         }
 
-        let (left, rest) = Self::split(self.root.take(), start);
-        let (mut mid, right) = Self::split(rest, end - start);
+        let root = self.root.take();
+        let (left, rest) = self.split_nodes(root, start);
+        let (mut mid, right) = self.split_nodes(rest, end - start);
         if let Some(node) = mid.as_deref_mut() {
             node.apply_reverse();
         }
-        self.root = Self::merge(left, Self::merge(mid, right));
+        let merged = self.merge_nodes(mid, right);
+        self.root = self.merge_nodes(left, merged);
     }
 }
 

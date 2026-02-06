@@ -13,8 +13,10 @@ Balanced binary search tree experiments with a shared sequence API.
 - Red-black tree: https://en.wikipedia.org/wiki/Red%E2%80%93black_tree
 
 ## Performance order (max size 256000, local benches)
-- Core workload: treap -> rb -> avl -> wbt -> splay -> zip -> rbst -> aa
-- Agg workload: rb -> treap -> rbst -> zip -> wbt -> avl -> splay -> aa
-- Agg_reverse workload: treap -> rbst -> zip -> avl -> wbt -> splay -> aa -> rb
-- Agg_lazy workload: rb -> treap -> rbst -> zip -> wbt -> avl -> splay -> aa
-- Full workload: treap -> zip -> rbst -> wbt -> splay -> avl -> rb -> aa
+Note: results can fluctuate significantly across reruns on a shared machine.
+
+- Core workload: treap -> avl -> rbst -> zip -> wbt -> rb -> aa -> splay
+- Agg workload: avl -> wbt -> rb -> aa -> rbst -> treap -> zip -> splay
+- Agg_reverse workload: wbt -> avl -> rb -> treap -> rbst -> zip -> aa -> splay
+- Agg_lazy workload: avl -> wbt -> rb -> rbst -> treap -> aa -> zip -> splay
+- Full workload: wbt -> avl -> rb -> treap -> rbst -> zip -> aa -> splay

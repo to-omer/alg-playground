@@ -12,8 +12,8 @@ const MEDIUM_RUNTIME_SAMPLE_SIZE: usize = 15;
 const MEDIUM_RUNTIME_WARM_UP_MS: u64 = 500;
 const MEDIUM_RUNTIME_MEASURE_MS: u64 = 1000;
 const LARGE_RUNTIME_SAMPLE_SIZE: usize = 10;
-const LARGE_RUNTIME_WARM_UP_MS: u64 = 800;
-const LARGE_RUNTIME_MEASURE_MS: u64 = 1500;
+const LARGE_RUNTIME_WARM_UP_MS: u64 = 1000;
+const LARGE_RUNTIME_MEASURE_MS: u64 = 2500;
 const RNG_SEED: u64 = 0x5EED_2026;
 
 pub fn apply_small_runtime_config<M: Measurement>(group: &mut BenchmarkGroup<'_, M>) {

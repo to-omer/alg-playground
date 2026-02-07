@@ -1,0 +1,17 @@
+[package]
+name = "rmq"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+bench = { path = "../bench" }
+criterion = "0.8.1"
+rand = "0.9"
+
+[[bench]]
+name = "rmq"
+harness = false
+

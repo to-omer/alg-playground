@@ -3,7 +3,7 @@ use std::ops::{Bound, RangeBounds};
 use crate::policy::LazyMapMonoid;
 use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, SequenceSplitMerge};
 
-pub struct ImplicitRbTree<P: LazyMapMonoid> {
+pub struct ImplicitLlrbTree<P: LazyMapMonoid> {
     root: Link<P>,
     len: u32,
     split_left_stack: Vec<Box<Node<P>>>,
@@ -136,7 +136,7 @@ impl<P: LazyMapMonoid> Node<P> {
     }
 }
 
-impl<P: LazyMapMonoid> ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> ImplicitLlrbTree<P> {
     pub fn new() -> Self {
         Self::with_seed(0)
     }
@@ -786,7 +786,7 @@ impl<P: LazyMapMonoid> ImplicitRbTree<P> {
     }
 }
 
-impl<P> Clone for ImplicitRbTree<P>
+impl<P> Clone for ImplicitLlrbTree<P>
 where
     P: LazyMapMonoid,
     P::Key: Clone,
@@ -803,13 +803,13 @@ where
     }
 }
 
-impl<P: LazyMapMonoid> Default for ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> Default for ImplicitLlrbTree<P> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> SequenceBase for ImplicitLlrbTree<P> {
     type Key = P::Key;
 
     fn len(&self) -> usize {
@@ -844,7 +844,7 @@ impl<P: LazyMapMonoid> SequenceBase for ImplicitRbTree<P> {
     }
 }
 
-impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitLlrbTree<P> {
     fn split_at(&mut self, index: usize) -> Self {
         let root = self.root.take();
         let (left, right) = self.split_nodes(root, index.min(self.len as usize));
@@ -867,7 +867,7 @@ impl<P: LazyMapMonoid> SequenceSplitMerge for ImplicitRbTree<P> {
     }
 }
 
-impl<P: LazyMapMonoid> SequenceAgg for ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> SequenceAgg for ImplicitLlrbTree<P> {
     type Agg = P::Agg;
 
     fn fold<R: RangeBounds<usize>>(&mut self, range: R) -> Self::Agg {
@@ -882,7 +882,7 @@ impl<P: LazyMapMonoid> SequenceAgg for ImplicitRbTree<P> {
     }
 }
 
-impl<P: LazyMapMonoid> SequenceLazy for ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> SequenceLazy for ImplicitLlrbTree<P> {
     type Act = P::Act;
 
     fn update<R: RangeBounds<usize>>(&mut self, range: R, act: Self::Act) {
@@ -897,7 +897,7 @@ impl<P: LazyMapMonoid> SequenceLazy for ImplicitRbTree<P> {
     }
 }
 
-impl<P: LazyMapMonoid> SequenceReverse for ImplicitRbTree<P> {
+impl<P: LazyMapMonoid> SequenceReverse for ImplicitLlrbTree<P> {
     fn reverse<R: RangeBounds<usize>>(&mut self, range: R) {
         let Some((start, end)) = Self::normalize_range(range, self.len as usize) else {
             return;
@@ -919,15 +919,17 @@ impl<P: LazyMapMonoid> SequenceReverse for ImplicitRbTree<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::ImplicitRbTree;
+    use super::ImplicitLlrbTree;
     use crate::policy::RangeSumRangeAdd;
-    use crate::traits::{SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse};
+    use crate::traits::{
+        SequenceAgg, SequenceBase, SequenceLazy, SequenceReverse, SequenceSplitMerge,
+    };
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
     #[test]
     fn insert_and_get() {
-        let mut tree = ImplicitRbTree::<RangeSumRangeAdd>::new();
+        let mut tree = ImplicitLlrbTree::<RangeSumRangeAdd>::new();
         for i in 0..10 {
             tree.insert(i, i as i64);
         }
@@ -940,7 +942,7 @@ mod tests {
     #[test]
     fn random_operations_match_vec() {
         let mut rng = StdRng::seed_from_u64(0x5EED_2026);
-        let mut tree = ImplicitRbTree::<RangeSumRangeAdd>::new();
+        let mut tree = ImplicitLlrbTree::<RangeSumRangeAdd>::new();
         let mut vec = Vec::<i64>::new();
 
         for _ in 0..2000 {
@@ -1001,6 +1003,31 @@ mod tests {
                     assert_eq!(tree.fold(l..r), expected);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn split_merge_roundtrip() {
+        let mut rng = StdRng::seed_from_u64(0x5EED_2027);
+        let mut tree = ImplicitLlrbTree::<RangeSumRangeAdd>::new();
+        let mut vec = Vec::<i64>::new();
+
+        for _ in 0..2000 {
+            let index = rng.random_range(0..=vec.len());
+            let mut right_tree = tree.split_at(index);
+            let right_vec = vec.split_off(index);
+
+            assert_eq!(tree.len(), vec.len());
+            assert_eq!(right_tree.len(), right_vec.len());
+            for i in 0..vec.len() {
+                assert_eq!(tree.get(i), vec.get(i));
+            }
+            for i in 0..right_vec.len() {
+                assert_eq!(right_tree.get(i), right_vec.get(i));
+            }
+
+            tree.merge(right_tree);
+            vec.extend(right_vec);
         }
     }
 }

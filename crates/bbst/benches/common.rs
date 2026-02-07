@@ -8,9 +8,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use bbst::{
-    ImplicitAaTree, ImplicitAvl, ImplicitRbTree, ImplicitRbst, ImplicitSplay, ImplicitTreap,
-    ImplicitWbt, ImplicitZipTree, LazyMapMonoid, SequenceAgg, SequenceBase, SequenceLazy,
-    SequenceReverse,
+    ImplicitAaTree, ImplicitAvl, ImplicitLlrbTree, ImplicitRbTree, ImplicitRbst, ImplicitSplay,
+    ImplicitTreap, ImplicitWbt, ImplicitZipTree, LazyMapMonoid, SequenceAgg, SequenceBase,
+    SequenceLazy, SequenceReverse,
 };
 
 const SIZES: [usize; 5] = [1_000, 4_000, 16_000, 64_000, 256_000];
@@ -114,6 +114,12 @@ impl<P: LazyMapMonoid<Key = i64>> BenchTree<P> for ImplicitRbTree<P> {
     }
 }
 
+impl<P: LazyMapMonoid<Key = i64>> BenchTree<P> for ImplicitLlrbTree<P> {
+    fn with_seed(seed: u64) -> Self {
+        Self::with_seed(seed)
+    }
+}
+
 impl ActFromDelta for i64 {
     fn from_delta(delta: i64) -> Self {
         delta
@@ -153,6 +159,9 @@ where
         bench_tree::<ImplicitAaTree<P>, P, _>(&mut group, "aa", size, feature, base_seed, &initial);
         bench_tree::<ImplicitAvl<P>, P, _>(&mut group, "avl", size, feature, base_seed, &initial);
         bench_tree::<ImplicitRbTree<P>, P, _>(&mut group, "rb", size, feature, base_seed, &initial);
+        bench_tree::<ImplicitLlrbTree<P>, P, _>(
+            &mut group, "llrb", size, feature, base_seed, &initial,
+        );
     }
 
     group.finish();

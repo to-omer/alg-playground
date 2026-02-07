@@ -11,12 +11,13 @@ Balanced binary search tree experiments with a shared sequence API.
 - AA tree: https://en.wikipedia.org/wiki/AA_tree
 - AVL tree: https://en.wikipedia.org/wiki/AVL_tree
 - Red-black tree: https://en.wikipedia.org/wiki/Red%E2%80%93black_tree
+- Left-leaning red-black tree (LLRB): https://algs4.cs.princeton.edu/33balanced/RedBlackBST.java.html
 
 ## Performance order (max size 256000, local benches)
 Note: results can fluctuate significantly across reruns on a shared machine.
 
-- Core workload: treap -> avl -> rbst -> zip -> wbt -> rb -> aa -> splay
-- Agg workload: avl -> wbt -> rb -> aa -> rbst -> treap -> zip -> splay
-- Agg_reverse workload: wbt -> avl -> rb -> treap -> rbst -> zip -> aa -> splay
-- Agg_lazy workload: avl -> wbt -> rb -> rbst -> treap -> aa -> zip -> splay
-- Full workload: wbt -> avl -> rb -> treap -> rbst -> zip -> aa -> splay
+- Core workload: avl -> rb -> llrb -> treap -> wbt -> aa -> rbst -> splay -> zip
+- Agg workload: wbt -> avl -> rb -> aa -> llrb -> rbst -> treap -> zip -> splay
+- Agg_reverse workload: wbt -> avl -> treap -> zip -> rbst -> splay -> aa -> rb -> llrb
+- Agg_lazy workload: avl -> wbt -> rb -> llrb -> zip -> treap -> rbst -> aa -> splay
+- Full workload: avl -> wbt -> zip -> rbst -> treap -> splay -> aa -> rb -> llrb

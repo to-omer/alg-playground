@@ -1,5 +1,6 @@
 pub mod aa;
 pub mod avl;
+pub mod llrb;
 pub mod rb;
 pub mod rbst;
 pub mod splay;

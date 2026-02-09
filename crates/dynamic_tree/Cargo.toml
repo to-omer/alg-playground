@@ -1,0 +1,17 @@
+[package]
+name = "dynamic_tree"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+bench = { path = "../bench" }
+criterion = "0.8.1"
+rand = "0.9"
+
+[[bench]]
+name = "dynamic_tree"
+harness = false
+path = "benches/dynamic_tree.rs"

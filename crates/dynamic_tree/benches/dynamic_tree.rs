@@ -6,7 +6,7 @@ use criterion::measurement::Measurement;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use dynamic_tree::policy::VertexSumAdd;
-use dynamic_tree::{EulerTourTree, LinkCutTree, TopTree};
+use dynamic_tree::{EulerTourTree, LinkCutTree, LinkCutTreeSubtree, TopTree};
 
 mod common;
 
@@ -38,6 +38,35 @@ fn bench_connectivity(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let mut tree = LinkCutTree::<VertexSumAdd>::new(&values);
+                    for &(u, v) in &edges {
+                        tree.link(u, v);
+                    }
+                    let start = Instant::now();
+                    for op in &ops {
+                        match *op {
+                            common::ConnOp::Link { u, v } => {
+                                let _ = tree.link(u, v);
+                            }
+                            common::ConnOp::Cut { u, v } => {
+                                let _ = tree.cut(u, v);
+                            }
+                            common::ConnOp::Connected { u, v } => {
+                                black_box(tree.connected(u, v));
+                            }
+                        }
+                    }
+                    black_box(tree.len());
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+
+        group.bench_function(BenchmarkId::new("lct_subtree", size), |bencher| {
+            bencher.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tree = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
                     for &(u, v) in &edges {
                         tree.link(u, v);
                     }
@@ -175,6 +204,39 @@ fn bench_path_sum(c: &mut Criterion) {
             })
         });
 
+        group.bench_function(BenchmarkId::new("lct_subtree", size), |bencher| {
+            bencher.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tree = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
+                    for &(u, v) in &edges {
+                        tree.link(u, v);
+                    }
+                    let start = Instant::now();
+                    for op in &ops {
+                        match *op {
+                            common::PathOp::VertexAdd { v, delta } => tree.vertex_add(v, delta),
+                            common::PathOp::PathSum { u, v } => {
+                                black_box(tree.path_sum(u, v).unwrap());
+                            }
+                            common::PathOp::EdgeSwap {
+                                cut_u,
+                                cut_v,
+                                link_u,
+                                link_v,
+                            } => {
+                                tree.cut(cut_u, cut_v);
+                                tree.link(link_u, link_v);
+                            }
+                        }
+                    }
+                    black_box(tree.len());
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+
         group.bench_function(BenchmarkId::new("top_tree", size), |bencher| {
             bencher.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
@@ -229,6 +291,36 @@ fn bench_component_sum(c: &mut Criterion) {
         let top_tree_reserve = 3_usize
             .saturating_mul(edges.len().saturating_add(link_ops))
             .saturating_add(64);
+
+        group.bench_function(BenchmarkId::new("lct_subtree", size), |bencher| {
+            bencher.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tree = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
+                    for &(u, v) in &edges {
+                        tree.link(u, v);
+                    }
+                    let start = Instant::now();
+                    for op in &ops {
+                        match *op {
+                            common::CompOp::VertexAdd { v, delta } => tree.vertex_add(v, delta),
+                            common::CompOp::ComponentSum { v } => {
+                                black_box(tree.component_sum(v));
+                            }
+                            common::CompOp::Link { u, v } => {
+                                let _ = tree.link(u, v);
+                            }
+                            common::CompOp::Cut { u, v } => {
+                                let _ = tree.cut(u, v);
+                            }
+                        }
+                    }
+                    black_box(tree.len());
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
 
         group.bench_function(BenchmarkId::new("ett", size), |bencher| {
             bencher.iter_custom(|iters| {
@@ -347,6 +439,41 @@ fn bench_path_apply(c: &mut Criterion) {
             })
         });
 
+        group.bench_function(BenchmarkId::new("lct_subtree", size), |bencher| {
+            bencher.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tree = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
+                    for &(u, v) in &edges {
+                        tree.link(u, v);
+                    }
+                    let start = Instant::now();
+                    for op in &ops {
+                        match *op {
+                            common::PathApplyOp::PathApply { u, v, delta } => {
+                                tree.path_apply(u, v, delta);
+                            }
+                            common::PathApplyOp::PathFold { u, v } => {
+                                black_box(tree.path_fold(u, v).unwrap());
+                            }
+                            common::PathApplyOp::EdgeSwap {
+                                cut_u,
+                                cut_v,
+                                link_u,
+                                link_v,
+                            } => {
+                                tree.cut(cut_u, cut_v);
+                                tree.link(link_u, link_v);
+                            }
+                        }
+                    }
+                    black_box(tree.len());
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
+
         group.bench_function(BenchmarkId::new("top_tree", size), |bencher| {
             bencher.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
@@ -403,6 +530,38 @@ fn bench_component_apply(c: &mut Criterion) {
         let top_tree_reserve = 3_usize
             .saturating_mul(edges.len().saturating_add(link_ops))
             .saturating_add(64);
+
+        group.bench_function(BenchmarkId::new("lct_subtree", size), |bencher| {
+            bencher.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tree = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
+                    for &(u, v) in &edges {
+                        tree.link(u, v);
+                    }
+                    let start = Instant::now();
+                    for op in &ops {
+                        match *op {
+                            common::CompApplyOp::ComponentApply { v, delta } => {
+                                tree.component_apply(v, delta);
+                            }
+                            common::CompApplyOp::ComponentFold { v } => {
+                                black_box(tree.component_fold(v));
+                            }
+                            common::CompApplyOp::Link { u, v } => {
+                                tree.link(u, v);
+                            }
+                            common::CompApplyOp::Cut { u, v } => {
+                                tree.cut(u, v);
+                            }
+                        }
+                    }
+                    black_box(tree.len());
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
 
         group.bench_function(BenchmarkId::new("ett", size), |bencher| {
             bencher.iter_custom(|iters| {
@@ -489,6 +648,43 @@ fn bench_subtree_ops(c: &mut Criterion) {
         let top_tree_reserve = 3_usize
             .saturating_mul(edges.len().saturating_add(link_ops))
             .saturating_add(64);
+
+        group.bench_function(BenchmarkId::new("lct_subtree", size), |bencher| {
+            bencher.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut tree = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
+                    for &(u, v) in &edges {
+                        tree.link(u, v);
+                    }
+                    let start = Instant::now();
+                    for op in &ops {
+                        match *op {
+                            common::SubtreeOp::SubtreeApply {
+                                child,
+                                parent,
+                                delta,
+                            } => tree.subtree_apply(child, parent, delta),
+                            common::SubtreeOp::SubtreeFold { child, parent } => {
+                                black_box(tree.subtree_fold(child, parent));
+                            }
+                            common::SubtreeOp::EdgeSwap {
+                                cut_u,
+                                cut_v,
+                                link_u,
+                                link_v,
+                            } => {
+                                tree.cut(cut_u, cut_v);
+                                tree.link(link_u, link_v);
+                            }
+                        }
+                    }
+                    black_box(tree.len());
+                    total += start.elapsed();
+                }
+                total
+            })
+        });
 
         group.bench_function(BenchmarkId::new("ett", size), |bencher| {
             bencher.iter_custom(|iters| {

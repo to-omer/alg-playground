@@ -3,10 +3,12 @@ pub mod traits;
 
 mod ett;
 mod lct;
+mod lct_subtree;
 mod top_tree;
 
 pub use ett::EulerTourTree;
 pub use lct::LinkCutTree;
+pub use lct_subtree::LinkCutTreeSubtree;
 pub use top_tree::TopTree;
 
 pub use traits::{ComponentOps, DynamicForest, PathOps, SubtreeOps, VertexOps};
@@ -155,6 +157,226 @@ mod tests {
                 let got = VertexAffineSum::act_apply_agg(&sum, &act, len);
                 let expected = policy_apply_agg_naive::<VertexAffineSum>(&xs, act);
                 assert_eq!(got, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn lct_subtree_random_against_bfs_with_ops() {
+        let mut rng = StdRng::seed_from_u64(0x1C75_B7EE_u64);
+        let n = 30_usize;
+        let steps = 20_000_usize;
+        let log_cap = 200_usize;
+        let mut log = VecDeque::<String>::new();
+
+        let mut values = (0..n)
+            .map(|_| rng.random_range(-500_i64..=500))
+            .collect::<Vec<_>>();
+        let mut lct = LinkCutTreeSubtree::<VertexSumAdd>::new(&values);
+        let mut g = vec![Vec::<usize>::new(); n];
+        let mut edges = Vec::<(usize, usize)>::new();
+
+        for it in 0..steps {
+            let op = rng.random_range(0..12);
+            match op {
+                0 => {
+                    // link
+                    let u = rng.random_range(0..n);
+                    let v = rng.random_range(0..n);
+                    if u == v || bfs_connected(&g, u, v) {
+                        continue;
+                    }
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("link {u} {v}"));
+                    assert!(lct.link(u, v));
+                    add_undirected_edge(&mut g, u, v);
+                    edges.push(edge_key(u, v));
+                }
+                1 => {
+                    // cut
+                    if edges.is_empty() {
+                        continue;
+                    }
+                    let idx = rng.random_range(0..edges.len());
+                    let (u, v) = edges.swap_remove(idx);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("cut {u} {v}"));
+                    assert!(lct.cut(u, v));
+                    remove_undirected_edge(&mut g, u, v);
+                }
+                2 => {
+                    // path fold
+                    let u = rng.random_range(0..n);
+                    let v = rng.random_range(0..n);
+                    let Some(path) = bfs_path(&g, u, v) else {
+                        continue;
+                    };
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("path_fold {u} {v}"));
+                    let expected = path.into_iter().map(|x| values[x]).sum::<i64>();
+                    let got = lct.path_fold(u, v).unwrap();
+                    assert_eq!(got, expected, "it={it} path_fold({u},{v})");
+                }
+                3 => {
+                    // path apply
+                    let u = rng.random_range(0..n);
+                    let v = rng.random_range(0..n);
+                    let Some(path) = bfs_path(&g, u, v) else {
+                        continue;
+                    };
+                    let delta = rng.random_range(-10_i64..=10);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("path_apply {u} {v} {delta}"));
+                    assert!(lct.path_apply(u, v, delta));
+                    for x in path {
+                        values[x] += delta;
+                    }
+                }
+                4 => {
+                    // component fold
+                    let v = rng.random_range(0..n);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("component_fold {v}"));
+                    let expected = bfs_component_sum(&g, &values, v);
+                    let got = lct.component_fold(v);
+                    if got != expected {
+                        let verts = bfs_component_vertices(&g, v);
+                        let mut bad = Vec::new();
+                        for &x in &verts {
+                            let got_key = lct.vertex_get(x);
+                            let expected_key = values[x];
+                            if got_key != expected_key {
+                                bad.push((x, got_key, expected_key));
+                            }
+                        }
+                        let got_after = lct.component_fold(v);
+                        panic!(
+                            "it={it} component_fold({v}) got={got} expected={expected} got_after={got_after} bad={bad:?} log={log:?}"
+                        );
+                    }
+                }
+                5 => {
+                    // component apply
+                    let v = rng.random_range(0..n);
+                    let delta = rng.random_range(-10_i64..=10);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("component_apply {v} {delta}"));
+                    lct.component_apply(v, delta);
+                    for x in bfs_component_vertices(&g, v) {
+                        values[x] += delta;
+                    }
+                }
+                6 => {
+                    // component size
+                    let v = rng.random_range(0..n);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("component_size {v}"));
+                    let expected = bfs_component_vertices(&g, v).len();
+                    let got = lct.component_size(v);
+                    assert_eq!(got, expected, "it={it} component_size({v})");
+                }
+                7 => {
+                    // subtree_fold
+                    if edges.is_empty() {
+                        continue;
+                    }
+                    let &(a, b) = &edges[rng.random_range(0..edges.len())];
+                    let (child, parent) = if rng.random_bool(0.5) { (a, b) } else { (b, a) };
+
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("subtree_fold {child} {parent}"));
+                    remove_undirected_edge(&mut g, child, parent);
+                    let expected = bfs_component_sum(&g, &values, child);
+                    add_undirected_edge(&mut g, child, parent);
+
+                    let got = lct.subtree_fold(child, parent);
+                    assert_eq!(got, expected, "it={it} subtree_fold({child},{parent})");
+                }
+                8 => {
+                    // subtree_apply
+                    if edges.is_empty() {
+                        continue;
+                    }
+                    let &(a, b) = &edges[rng.random_range(0..edges.len())];
+                    let (child, parent) = if rng.random_bool(0.5) { (a, b) } else { (b, a) };
+                    let delta = rng.random_range(-10_i64..=10);
+
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("subtree_apply {child} {parent} {delta}"));
+                    remove_undirected_edge(&mut g, child, parent);
+                    for x in bfs_component_vertices(&g, child) {
+                        values[x] += delta;
+                    }
+                    add_undirected_edge(&mut g, child, parent);
+
+                    lct.subtree_apply(child, parent, delta);
+                }
+                9 => {
+                    // vertex set
+                    let v = rng.random_range(0..n);
+                    let key = rng.random_range(-500_i64..=500);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("vertex_set {v} {key}"));
+                    lct.vertex_set(v, key);
+                    values[v] = key;
+                }
+                10 => {
+                    // vertex apply (add)
+                    let v = rng.random_range(0..n);
+                    let delta = rng.random_range(-10_i64..=10);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("vertex_apply {v} {delta}"));
+                    lct.vertex_apply(v, delta);
+                    values[v] += delta;
+                }
+                _ => {
+                    // connected + path_kth
+                    let u = rng.random_range(0..n);
+                    let v = rng.random_range(0..n);
+                    if log.len() == log_cap {
+                        log.pop_front();
+                    }
+                    log.push_back(format!("connected {u} {v}"));
+                    assert_eq!(lct.connected(u, v), bfs_connected(&g, u, v));
+                    if let Some(path) = bfs_path(&g, u, v) {
+                        let k = rng.random_range(0..path.len());
+                        if log.len() == log_cap {
+                            log.pop_front();
+                        }
+                        log.push_back(format!("path_kth {u} {v} {k}"));
+                        let got = lct.path_kth(u, v, k).unwrap();
+                        assert_eq!(got, path[k], "it={it} path_kth({u},{v},{k})");
+                    }
+                }
+            }
+
+            // Debug: spot early divergence on a fixed vertex.
+            let got10 = lct.vertex_get(10);
+            let expected10 = values[10];
+            if got10 != expected10 {
+                panic!("it={it} vertex_get(10) got={got10} expected={expected10} last={log:?}");
             }
         }
     }

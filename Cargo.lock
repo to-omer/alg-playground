@@ -561,6 +561,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sssp"
+version = "0.1.0"
+dependencies = [
+ "bench",
+ "criterion",
+ "rand",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.114"
 source = "registry+https://github.com/rust-lang/crates.io-index"
